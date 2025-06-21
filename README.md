@@ -2,7 +2,7 @@
 
 A fast, lightweight URL shortener built with Rust.
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 
@@ -31,6 +31,8 @@ Configure the application using environment variables:
 ```bash
 # Set custom port (default: 3000)
 export PORT=8080
+# Set base URL (default: https://yue.lat)
+export BASE_URL=https://maoyue.tw
 
 # Or use a .env file
 echo "PORT=8080" > .env
@@ -73,7 +75,7 @@ Redirects to the original URL with a 301 Permanent Redirect.
 curl -I http://localhost:3000/abc123
 ```
 
-## Architecture
+## 🏗️ Architecture
 
 - **Framework**: [Axum](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
 - **Database**: [SQLite](https://www.sqlite.org/) with [rusqlite](https://github.com/rusqlite/rusqlite)
@@ -91,7 +93,7 @@ CREATE TABLE urls (
 );
 ```
 
-## Deployment
+## 📦 Deployment
 
 ### Docker
 
@@ -117,7 +119,7 @@ docker build -t yue-lat .
 docker run -p 3000:3000 yue-lat
 ```
 
-## Contributing
+## 🤝 Contributing
 
 We welcome contributions! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
 
@@ -127,11 +129,11 @@ We welcome contributions! Please feel free to submit a Pull Request. For major c
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## License
+## 📝 License
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
-## Connect
+## 📞 Connect
 
 - **GitHub**: [MagicTeaMC/yue-lat](https://github.com/MagicTeaMC/yue-lat)
 - **Discord**: [Join our community](https://discord.gg/uQ4UXANnP2)

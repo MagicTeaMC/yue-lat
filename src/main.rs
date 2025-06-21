@@ -13,8 +13,12 @@ use std::{env, sync::Arc};
 use tokio::sync::Mutex;
 use tracing_subscriber;
 
-// Shared state for SQLite connection
-type DbState = Arc<Mutex<Connection>>;
+// Shared state for SQLite connection and base URL
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Mutex<Connection>>,
+    base_url: String,
+}
 
 #[tokio::main]
 async fn main() {
@@ -26,16 +30,27 @@ async fn main() {
         .parse()
         .expect("PORT must be a valid number");
 
+    let base_url = env::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
+
+    // Remove trailing slash if present
+    let base_url = base_url.trim_end_matches('/').to_string();
+
+    tracing::info!("Using base URL: {}", base_url);
+
     // Initialize SQLite database
     let db = setup_database().await.expect("Failed to setup database");
-    let db_state: DbState = Arc::new(Mutex::new(db));
+
+    let app_state = AppState {
+        db: Arc::new(Mutex::new(db)),
+        base_url,
+    };
 
     let app = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/shorten", post(create_url))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
-        .with_state(db_state);
+        .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
@@ -161,10 +176,10 @@ async fn root() -> Html<&'static str> {
 }
 
 async fn create_url(
-    State(db): State<DbState>,
+    State(app_state): State<AppState>,
     Json(payload): Json<CreateUrlRequest>,
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let result = shorten_url(db, payload.url).await;
+    let result = shorten_url(app_state, payload.url).await;
     match result {
         Ok(response) => {
             tracing::info!(
@@ -182,10 +197,10 @@ async fn create_url(
 }
 
 async fn create_url_form(
-    State(db): State<DbState>,
+    State(app_state): State<AppState>,
     Form(payload): Form<CreateUrlRequest>,
 ) -> Html<String> {
-    let result = shorten_url(db, payload.url).await;
+    let result = shorten_url(app_state, payload.url).await;
     match result {
         Ok(response) => {
             tracing::info!(
@@ -260,7 +275,7 @@ async fn create_url_form(
     }
 }
 
-async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorResponse> {
+async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, ErrorResponse> {
     // Validate URL
     if url.trim().is_empty() {
         return Err(ErrorResponse {
@@ -282,7 +297,7 @@ async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorRespo
 
     loop {
         let short_code = generate_short_code();
-        let db_lock = db.lock().await;
+        let db_lock = app_state.db.lock().await;
 
         // Check if short code already exists
         let exists: bool = db_lock
@@ -304,7 +319,7 @@ async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorRespo
                     let response = UrlResponse {
                         original_url: url,
                         short_code: short_code.clone(),
-                        short_url: format!("https://yue.lat/{}", short_code),
+                        short_url: format!("{}/{}", app_state.base_url, short_code),
                     };
                     return Ok(response);
                 }
@@ -330,9 +345,9 @@ async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorRespo
 
 async fn redirect_url(
     Path(short_code): Path<String>,
-    State(db): State<DbState>,
+    State(app_state): State<AppState>,
 ) -> Result<Redirect, StatusCode> {
-    let db_lock = db.lock().await;
+    let db_lock = app_state.db.lock().await;
 
     let result = db_lock
         .prepare("SELECT original_url FROM urls WHERE short_code = ?1")
