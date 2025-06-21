@@ -36,11 +36,11 @@ async fn main() {
         .route("/{short_code}", get(redirect_url))
         .with_state(db_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
 
-    tracing::info!("URL Shortener listening on http://127.0.0.1:{}", port);
+    tracing::info!("URL Shortener listening on http://0.0.0.0:{}", port);
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -278,7 +278,7 @@ async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorRespo
                     let response = UrlResponse {
                         original_url: url,
                         short_code: short_code.clone(),
-                        short_url: format!("http://127.0.0.1:3000/{}", short_code),
+                        short_url: format!("https://yue.lat/{}", short_code),
                     };
                     return Ok(response);
                 }
