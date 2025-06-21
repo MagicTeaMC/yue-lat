@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}URL Shortened{% endblock %}
+
+{% block content %}
+<h1>URL Shortened</h1>
+<div class="result">
+    <p><strong>Short URL:</strong> <a href="{{ short_url }}" target="_blank">{{ short_url }}</a></p>
+</div>
+<a href="/">← Create Another</a>
+{% endblock %}

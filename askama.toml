@@ -1,0 +1,7 @@
+[general]
+
+dirs = ["templates"]
+
+ext = "html"
+
+escape = "html"

@@ -1,3 +1,4 @@
+use askama::Template;
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
@@ -11,6 +12,23 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::env;
 use tracing_subscriber;
+
+// Template structs
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate;
+
+#[derive(Template)]
+#[template(path = "success.html")]
+struct SuccessTemplate {
+    short_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    error_message: String,
+}
 
 // Shared state with SQLite connection pool
 #[derive(Clone)]
@@ -101,87 +119,15 @@ async fn favicon() -> Response {
         .unwrap()
 }
 
-fn get_common_styles() -> &'static str {
-    r#"
-        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
-        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
-        input:focus { outline: none; border-color: #007bff; }
-        button { background: #007bff; color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .result { margin-top: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }
-        .footer { margin-top: 2rem; text-align: center; padding-top: 1rem; border-top: 1px solid #404040; }
-        .social-links { display: flex; justify-content: center; gap: 1rem; margin-top: 0.5rem; }
-        .social-links a { color: #007bff; text-decoration: none; padding: 0.5rem; border-radius: 4px; transition: background-color 0.2s; }
-        .social-links a:hover { background-color: #2a2a2a; }
-        .social-links a::before { margin-right: 0.5rem; }
-        .github::before { content: "🐙"; }
-        .discord::before { content: "💬"; }
-        a { color: #4da6ff; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        .error { background: #3a1f1f; color: #ff6b6b; padding: 1rem; border-radius: 4px; border: 1px solid #5a2a2a; }
-    "#
-}
-
-fn get_favicon_meta() -> &'static str {
-    r#"<link rel="icon" type="image/svg+xml" href="/favicon.ico">"#
-}
-
-fn get_footer_html() -> &'static str {
-    r#"
-    <div class="footer">
-        <div>Made with 🦀 Rust and ❤️ in Taiwan</div>
-        <div class="social-links">
-            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
-            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
-        </div>
-    </div>
-    "#
-}
-
-async fn root() -> Html<&'static str> {
-    Html(
-        r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <title>URL Shortener</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
-        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
-        input:focus { outline: none; border-color: #007bff; }
-        button { background: #007bff; color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .result { margin-top: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }
-        .footer { margin-top: 2rem; text-align: center; padding-top: 1rem; border-top: 1px solid #404040; }
-        .social-links { display: flex; justify-content: center; gap: 1rem; margin-top: 0.5rem; }
-        .social-links a { color: #007bff; text-decoration: none; padding: 0.5rem; border-radius: 4px; transition: background-color 0.2s; }
-        .social-links a:hover { background-color: #2a2a2a; }
-        .social-links a::before { margin-right: 0.5rem; }
-        .github::before { content: "🐙"; }
-        .discord::before { content: "💬"; }
-    </style>
-</head>
-<body>
-    <h1>URL Shortener</h1>
-    <form method="post">
-        <input type="url" name="url" placeholder="https://example.com" required>
-        <button type="submit">Shorten</button>
-    </form>
-    
-    <div class="footer">
-        <div>Made with 🦀 Rust and ❤️ in Taiwan</div>
-        <div class="social-links">
-            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
-            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
-        </div>
-    </div>
-</body>
-</html>
-    "#,
-    )
+async fn root() -> Result<Html<String>, StatusCode> {
+    let template = IndexTemplate;
+    match template.render() {
+        Ok(html) => Ok(Html(html)),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn create_url(
@@ -208,8 +154,9 @@ async fn create_url(
 async fn create_url_form(
     State(app_state): State<AppState>,
     Form(payload): Form<CreateUrlRequest>,
-) -> Html<String> {
+) -> Result<Html<String>, StatusCode> {
     let result = shorten_url(app_state, payload.url).await;
+
     match result {
         Ok(response) => {
             tracing::info!(
@@ -217,69 +164,36 @@ async fn create_url_form(
                 response.short_code,
                 response.original_url
             );
-            Html(format!(
-                r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <title>URL Shortened</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    {}
-    <style>
-        {}
-    </style>
-</head>
-<body>
-    <h1>URL Shortened</h1>
-    <div class="result">
-        <p><strong>Short URL:</strong> <a href="{}" target="_blank">{}</a></p>
-    </div>
-    <a href="/">← Create Another</a>
-    
-    {}
-</body>
-</html>
-            "#,
-                get_favicon_meta(),
-                get_common_styles(),
-                response.short_url,
-                response.short_url,
-                get_footer_html()
-            ))
+
+            let success_template = SuccessTemplate {
+                short_url: response.short_url,
+            };
+
+            match success_template.render() {
+                Ok(html) => Ok(Html(html)),
+                Err(e) => {
+                    tracing::error!("Template rendering error: {}", e);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
         }
         Err(error_response) => {
             tracing::warn!(
                 "Failed to create short URL via form: {}",
                 error_response.error
             );
-            Html(format!(
-                r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Error</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    {}
-    <style>
-        {}
-    </style>
-</head>
-<body>
-    <h1>Error</h1>
-    <div class="error">{}</div>
-    <a href="/">← Try Again</a>
-    
-    {}
-</body>
-</html>
-            "#,
-                get_favicon_meta(),
-                get_common_styles(),
-                error_response.error,
-                get_footer_html()
-            ))
+
+            let error_template = ErrorTemplate {
+                error_message: error_response.error,
+            };
+
+            match error_template.render() {
+                Ok(html) => Ok(Html(html)),
+                Err(e) => {
+                    tracing::error!("Template rendering error: {}", e);
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
         }
     }
 }
