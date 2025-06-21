@@ -1,17 +1,17 @@
 use axum::{
+    Form, Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::{Html, Redirect},
     routing::{get, post},
-    Form, Json, Router,
 };
+use dotenv::dotenv;
 use rand::Rng;
 use rusqlite::{Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
 use std::{env, sync::Arc};
 use tokio::sync::Mutex;
 use tracing_subscriber;
-use dotenv::dotenv;
 
 // Shared state for SQLite connection
 type DbState = Arc<Mutex<Connection>>;
@@ -20,7 +20,7 @@ type DbState = Arc<Mutex<Connection>>;
 async fn main() {
     tracing_subscriber::fmt::init();
     dotenv().ok();
-    
+
     let port: u16 = env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
@@ -39,14 +39,14 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
         .await
         .unwrap();
-    
+
     tracing::info!("URL Shortener listening on http://127.0.0.1:{}", port);
     axum::serve(listener, app).await.unwrap();
 }
 
 async fn setup_database() -> SqliteResult<Connection> {
     let conn = Connection::open("urls.db")?;
-    
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS urls (
             short_code TEXT PRIMARY KEY,
@@ -55,13 +55,14 @@ async fn setup_database() -> SqliteResult<Connection> {
         )",
         [],
     )?;
-    
+
     tracing::info!("Database initialized");
     Ok(conn)
 }
 
 async fn root() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -75,6 +76,13 @@ async fn root() -> Html<&'static str> {
         button { background: #007bff; color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
         button:hover { background: #0056b3; }
         .result { margin-top: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }
+        .footer { margin-top: 2rem; text-align: center; padding-top: 1rem; border-top: 1px solid #404040; }
+        .social-links { display: flex; justify-content: center; gap: 1rem; margin-top: 0.5rem; }
+        .social-links a { color: #007bff; text-decoration: none; padding: 0.5rem; border-radius: 4px; transition: background-color 0.2s; }
+        .social-links a:hover { background-color: #2a2a2a; }
+        .social-links a::before { margin-right: 0.5rem; }
+        .github::before { content: "🐙"; }
+        .discord::before { content: "💬"; }
     </style>
 </head>
 <body>
@@ -83,9 +91,18 @@ async fn root() -> Html<&'static str> {
         <input type="url" name="url" placeholder="https://example.com" required>
         <button type="submit">Shorten</button>
     </form>
+    
+    <div class="footer">
+        <div>Made with ❤️ in Taiwan</div>
+        <div class="social-links">
+            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
+            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
+        </div>
+    </div>
 </body>
 </html>
-    "#)
+    "#,
+    )
 }
 
 async fn create_url(
@@ -95,7 +112,11 @@ async fn create_url(
     let result = shorten_url(db, payload.url).await;
     match result {
         Ok(response) => {
-            tracing::info!("Created short URL: {} -> {}", response.short_code, response.original_url);
+            tracing::info!(
+                "Created short URL: {} -> {}",
+                response.short_code,
+                response.original_url
+            );
             Ok((StatusCode::CREATED, Json(response)))
         }
         Err(error_response) => {
@@ -112,8 +133,13 @@ async fn create_url_form(
     let result = shorten_url(db, payload.url).await;
     match result {
         Ok(response) => {
-            tracing::info!("Created short URL via form: {} -> {}", response.short_code, response.original_url);
-            Html(format!(r#"
+            tracing::info!(
+                "Created short URL via form: {} -> {}",
+                response.short_code,
+                response.original_url
+            );
+            Html(format!(
+                r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -135,11 +161,17 @@ async fn create_url_form(
     <a href="/">← Create Another</a>
 </body>
 </html>
-            "#, response.short_url, response.short_url))
+            "#,
+                response.short_url, response.short_url
+            ))
         }
         Err(error_response) => {
-            tracing::warn!("Failed to create short URL via form: {}", error_response.error);
-            Html(format!(r#"
+            tracing::warn!(
+                "Failed to create short URL via form: {}",
+                error_response.error
+            );
+            Html(format!(
+                r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -158,7 +190,9 @@ async fn create_url_form(
     <a href="/">← Try Again</a>
 </body>
 </html>
-            "#, error_response.error))
+            "#,
+                error_response.error
+            ))
         }
     }
 }
@@ -186,13 +220,11 @@ async fn shorten_url(db: DbState, url: String) -> Result<UrlResponse, ErrorRespo
     loop {
         let short_code = generate_short_code();
         let db_lock = db.lock().await;
-        
+
         // Check if short code already exists
         let exists: bool = db_lock
             .prepare("SELECT 1 FROM urls WHERE short_code = ?1")
-            .and_then(|mut stmt| {
-                stmt.query_row([&short_code], |_| Ok(true))
-            })
+            .and_then(|mut stmt| stmt.query_row([&short_code], |_| Ok(true)))
             .unwrap_or(false);
 
         if !exists {
@@ -238,7 +270,7 @@ async fn redirect_url(
     State(db): State<DbState>,
 ) -> Result<Redirect, StatusCode> {
     let db_lock = db.lock().await;
-    
+
     let result = db_lock
         .prepare("SELECT original_url FROM urls WHERE short_code = ?1")
         .and_then(|mut stmt| {
@@ -265,7 +297,7 @@ async fn redirect_url(
 fn generate_short_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const CODE_LENGTH: usize = 6;
-    
+
     let mut rng = rand::rng();
     (0..CODE_LENGTH)
         .map(|_| {
