@@ -5,7 +5,6 @@ A fast, lightweight URL shortener built with Rust.
 ## 🚀 Quick Start
 
 ### Prerequisites
-
 - [Rust](https://rustup.rs/) (1.70.0 or later)
 - [Cargo](https://doc.rust-lang.org/cargo/) (comes with Rust)
 
@@ -31,11 +30,13 @@ Configure the application using environment variables:
 ```bash
 # Set custom port (default: 3000)
 export PORT=8080
-# Set base URL (default: https://yue.lat)
+
+# Set base URL for generated links (default: https://yue.lat)
 export BASE_URL=https://maoyue.tw
 
 # Or use a .env file
 echo "PORT=8080" > .env
+echo "BASE_URL=https://maoyue.tw" >> .env
 ```
 
 ## 📖 Usage
@@ -47,7 +48,6 @@ Visit `http://localhost:3000` in your browser to access the web interface. Simpl
 ### API Endpoints
 
 #### Shorten a URL
-
 **POST** `/shorten`
 
 ```bash
@@ -60,35 +60,37 @@ curl -X POST http://localhost:3000/shorten \
 ```json
 {
   "original_url": "https://example.com",
-  "short_code": "abc123",
-  "short_url": "https://yue.lat/abc123"
+  "short_code": "aBc4",
+  "short_url": "https://yue.lat/aBc4"
 }
 ```
 
 #### Access Shortened URL
-
 **GET** `/{short_code}`
 
 Redirects to the original URL with a 301 Permanent Redirect.
 
 ```bash
-curl -I http://localhost:3000/abc123
+curl -I http://localhost:3000/aBc4
+# HTTP/1.1 301 Moved Permanently
+# Location: https://example.com
 ```
 
 ## 🏗️ Architecture
 
+### Tech Stack
 - **Framework**: [Axum](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
-- **Database**: [SQLite](https://www.sqlite.org/) with [rusqlite](https://github.com/rusqlite/rusqlite)
+- **Database**: [SQLite](https://www.sqlite.org/) with [SQLx](https://github.com/launchbadge/sqlx)
+- **Templates**: [Askama](https://github.com/djc/askama) - Type-safe template engine
 - **Async Runtime**: [Tokio](https://tokio.rs/) for high-performance async I/O
 - **Logging**: [tracing](https://github.com/tokio-rs/tracing) for structured logging
 - **Serialization**: [serde](https://serde.rs/) for JSON handling
 
 ### Database Schema
-
 ```sql
 CREATE TABLE urls (
-    short_code TEXT PRIMARY KEY,
-    original_url TEXT NOT NULL,
+    short_code TEXT PRIMARY KEY CHECK(length(short_code) <= 20),
+    original_url TEXT NOT NULL CHECK(length(original_url) <= 2048),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -98,7 +100,6 @@ CREATE TABLE urls (
 ### Docker
 
 Create a `Dockerfile`:
-
 ```dockerfile
 FROM rust:1.87 as builder
 WORKDIR /app
@@ -116,7 +117,14 @@ CMD ["./yue-lat"]
 Build and run:
 ```bash
 docker build -t yue-lat .
-docker run -p 3000:3000 yue-lat
+docker run -p 3000:3000 -e BASE_URL=https://yourdomain.com yue-lat
+```
+
+### Environment Variables for Production
+```bash
+PORT=3000
+BASE_URL=https://yourdomain.com
+RUST_LOG=info
 ```
 
 ## 🤝 Contributing
