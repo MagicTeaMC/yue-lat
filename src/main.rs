@@ -1,8 +1,8 @@
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
-    http::StatusCode,
-    response::{Html, Redirect},
+    http::{StatusCode, header},
+    response::{Html, Redirect, Response},
     routing::{get, post},
 };
 use dotenv::dotenv;
@@ -33,6 +33,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/shorten", post(create_url))
+        .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
         .with_state(db_state);
 
@@ -60,6 +61,22 @@ async fn setup_database() -> SqliteResult<Connection> {
     Ok(conn)
 }
 
+async fn favicon() -> Response {
+    // Simple link/chain icon as SVG favicon
+    let svg_favicon = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
+        <path d="M4.5 1A1.5 1.5 0 0 0 3 2.5v3A1.5 1.5 0 0 0 4.5 7h7A1.5 1.5 0 0 0 13 5.5v-3A1.5 1.5 0 0 0 11.5 1h-7z"/>
+        <path d="M11.5 9A1.5 1.5 0 0 0 10 10.5v3A1.5 1.5 0 0 0 11.5 15h3A1.5 1.5 0 0 0 16 13.5v-3A1.5 1.5 0 0 0 14.5 9h-3z"/>
+        <path d="M8.854 8.146a.5.5 0 0 0-.708.708l1.5 1.5a.5.5 0 0 0 .708-.708l-1.5-1.5z"/>
+    </svg>"##;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/svg+xml")
+        .header(header::CACHE_CONTROL, "public, max-age=604800") // Cache for 1 week
+        .body(svg_favicon.into())
+        .unwrap()
+}
+
 fn get_common_styles() -> &'static str {
     r#"
         body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
@@ -79,6 +96,10 @@ fn get_common_styles() -> &'static str {
         a:hover { text-decoration: underline; }
         .error { background: #3a1f1f; color: #ff6b6b; padding: 1rem; border-radius: 4px; border: 1px solid #5a2a2a; }
     "#
+}
+
+fn get_favicon_meta() -> &'static str {
+    r#"<link rel="icon" type="image/svg+xml" href="/favicon.ico">"#
 }
 
 fn get_footer_html() -> &'static str {
@@ -102,6 +123,7 @@ async fn root() -> Html<&'static str> {
     <title>URL Shortener</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <style>
         body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
         input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
@@ -179,6 +201,7 @@ async fn create_url_form(
     <title>URL Shortened</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {}
     <style>
         {}
     </style>
@@ -194,6 +217,7 @@ async fn create_url_form(
 </body>
 </html>
             "#,
+                get_favicon_meta(),
                 get_common_styles(),
                 response.short_url,
                 response.short_url,
@@ -213,6 +237,7 @@ async fn create_url_form(
     <title>Error</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {}
     <style>
         {}
     </style>
@@ -226,6 +251,7 @@ async fn create_url_form(
 </body>
 </html>
             "#,
+                get_favicon_meta(),
                 get_common_styles(),
                 error_response.error,
                 get_footer_html()
