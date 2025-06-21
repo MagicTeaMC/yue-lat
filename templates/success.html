@@ -1,11 +1,60 @@
 {% extends "base.html" %}
-
 {% block title %}URL Shortened{% endblock %}
-
 {% block content %}
 <h1>URL Shortened</h1>
 <div class="result">
-    <p><strong>Short URL:</strong> <a href="{{ short_url }}" target="_blank">{{ short_url }}</a></p>
+    <p><strong>Short URL:</strong> 
+        <span class="url-container">
+            <a href="{{ short_url }}" target="_blank">{{ short_url }}</a>
+            <button class="copy-btn" onclick="copyToClipboard('{{ short_url }}')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="m5 15-4-4v-6a2 2 0 0 1 2-2h6l4 4"></path>
+                </svg>
+            </button>
+        </span>
+    </p>
 </div>
 <a href="/">← Create Another</a>
+
+<script>
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(function() {
+        const btn = event.target.closest('.copy-btn');
+        const originalContent = btn.innerHTML;
+        btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20,6 9,17 4,12"></polyline></svg>';
+        btn.style.color = '#28a745';
+        setTimeout(() => {
+            btn.innerHTML = originalContent;
+            btn.style.color = '';
+        }, 1500);
+    });
+}
+</script>
+
+<style>
+.url-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.copy-btn {
+    background: transparent;
+    border: 1px solid #404040;
+    color: #e0e0e0;
+    padding: 0.25rem;
+    border-radius: 4px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.copy-btn:hover {
+    background: #3a3a3a;
+    border-color: #007bff;
+}
+</style>
 {% endblock %}
