@@ -7,16 +7,15 @@ use axum::{
 };
 use dotenv::dotenv;
 use rand::Rng;
-use rusqlite::{Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
-use std::{env, sync::Arc};
-use tokio::sync::Mutex;
+use sqlx::{Row, SqlitePool};
+use std::env;
 use tracing_subscriber;
 
-// Shared state for SQLite connection and base URL
+// Shared state with SQLite connection pool
 #[derive(Clone)]
 struct AppState {
-    db: Arc<Mutex<Connection>>,
+    db: SqlitePool,
     base_url: String,
 }
 
@@ -37,13 +36,10 @@ async fn main() {
 
     tracing::info!("Using base URL: {}", base_url);
 
-    // Initialize SQLite database
+    // Initialize SQLite connection pool
     let db = setup_database().await.expect("Failed to setup database");
 
-    let app_state = AppState {
-        db: Arc::new(Mutex::new(db)),
-        base_url,
-    };
+    let app_state = AppState { db, base_url };
 
     let app = Router::new()
         .route("/", get(root).post(create_url_form))
@@ -60,20 +56,33 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn setup_database() -> SqliteResult<Connection> {
-    let conn = Connection::open("urls.db")?;
+async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
+    // Create connection pool with configuration
+    let pool = SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename("urls.db")
+            .create_if_missing(true)
+            .pragma("journal_mode", "WAL") // Enable WAL mode for better concurrency
+            .pragma("synchronous", "NORMAL")
+            .pragma("cache_size", "1000")
+            .pragma("foreign_keys", "true")
+            .pragma("temp_store", "memory"),
+    )
+    .await?;
 
-    conn.execute(
+    // Create table if it doesn't exist
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS urls (
             short_code TEXT PRIMARY KEY,
             original_url TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )",
-        [],
-    )?;
+    )
+    .execute(&pool)
+    .await?;
 
-    tracing::info!("Database initialized");
-    Ok(conn)
+    tracing::info!("Database pool initialized with {} connections", pool.size());
+    Ok(pool)
 }
 
 async fn favicon() -> Response {
@@ -297,48 +306,56 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
     loop {
         let short_code = generate_short_code();
-        let db_lock = app_state.db.lock().await;
 
         // Check if short code already exists
-        let exists: bool = db_lock
-            .prepare("SELECT 1 FROM urls WHERE short_code = ?1")
-            .and_then(|mut stmt| stmt.query_row([&short_code], |_| Ok(true)))
-            .unwrap_or(false);
+        let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
+            .bind(&short_code)
+            .fetch_optional(&app_state.db)
+            .await;
 
-        if !exists {
-            // Insert new URL mapping
-            let result = db_lock.execute(
-                "INSERT INTO urls (short_code, original_url) VALUES (?1, ?2)",
-                [&short_code, &url],
-            );
+        match exists {
+            Ok(None) => {
+                // Short code doesn't exist, try to insert
+                let result =
+                    sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
+                        .bind(&short_code)
+                        .bind(&url)
+                        .execute(&app_state.db)
+                        .await;
 
-            drop(db_lock); // Release the lock
-
-            match result {
-                Ok(_) => {
-                    let response = UrlResponse {
-                        original_url: url,
-                        short_code: short_code.clone(),
-                        short_url: format!("{}/{}", app_state.base_url, short_code),
-                    };
-                    return Ok(response);
-                }
-                Err(e) => {
-                    tracing::error!("Database error: {}", e);
-                    return Err(ErrorResponse {
-                        error: "Database error".to_string(),
-                    });
+                match result {
+                    Ok(_) => {
+                        let response = UrlResponse {
+                            original_url: url,
+                            short_code: short_code.clone(),
+                            short_url: format!("{}/{}", app_state.base_url, short_code),
+                        };
+                        return Ok(response);
+                    }
+                    Err(e) => {
+                        tracing::error!("Database error: {}", e);
+                        return Err(ErrorResponse {
+                            error: "Database error".to_string(),
+                        });
+                    }
                 }
             }
-        }
-
-        drop(db_lock); // Release the lock before next iteration
-        attempts += 1;
-
-        if attempts >= max_attempts {
-            return Err(ErrorResponse {
-                error: "Unable to generate unique short code".to_string(),
-            });
+            Ok(Some(_)) => {
+                // Short code exists, try again
+                attempts += 1;
+                if attempts >= max_attempts {
+                    return Err(ErrorResponse {
+                        error: "Unable to generate unique short code".to_string(),
+                    });
+                }
+                continue;
+            }
+            Err(e) => {
+                tracing::error!("Database query error: {}", e);
+                return Err(ErrorResponse {
+                    error: "Database error".to_string(),
+                });
+            }
         }
     }
 }
@@ -347,27 +364,24 @@ async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
 ) -> Result<Redirect, StatusCode> {
-    let db_lock = app_state.db.lock().await;
-
-    let result = db_lock
-        .prepare("SELECT original_url FROM urls WHERE short_code = ?1")
-        .and_then(|mut stmt| {
-            stmt.query_row([&short_code], |row| {
-                let original_url: String = row.get(0)?;
-                Ok(original_url)
-            })
-        });
-
-    drop(db_lock);
+    let result = sqlx::query("SELECT original_url FROM urls WHERE short_code = ?")
+        .bind(&short_code)
+        .fetch_optional(&app_state.db)
+        .await;
 
     match result {
-        Ok(original_url) => {
+        Ok(Some(row)) => {
+            let original_url: String = row.get("original_url");
             tracing::debug!("Redirecting {} -> {}", short_code, original_url);
             Ok(Redirect::permanent(&original_url))
         }
-        Err(_) => {
+        Ok(None) => {
             tracing::warn!("Short code not found: {}", short_code);
             Err(StatusCode::NOT_FOUND)
+        }
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }
