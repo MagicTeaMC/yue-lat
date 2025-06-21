@@ -60,6 +60,39 @@ async fn setup_database() -> SqliteResult<Connection> {
     Ok(conn)
 }
 
+fn get_common_styles() -> &'static str {
+    r#"
+        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
+        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
+        input:focus { outline: none; border-color: #007bff; }
+        button { background: #007bff; color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .result { margin-top: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }
+        .footer { margin-top: 2rem; text-align: center; padding-top: 1rem; border-top: 1px solid #404040; }
+        .social-links { display: flex; justify-content: center; gap: 1rem; margin-top: 0.5rem; }
+        .social-links a { color: #007bff; text-decoration: none; padding: 0.5rem; border-radius: 4px; transition: background-color 0.2s; }
+        .social-links a:hover { background-color: #2a2a2a; }
+        .social-links a::before { margin-right: 0.5rem; }
+        .github::before { content: "🐙"; }
+        .discord::before { content: "💬"; }
+        a { color: #4da6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .error { background: #3a1f1f; color: #ff6b6b; padding: 1rem; border-radius: 4px; border: 1px solid #5a2a2a; }
+    "#
+}
+
+fn get_footer_html() -> &'static str {
+    r#"
+    <div class="footer">
+        <div>Made with ❤️ in Taiwan</div>
+        <div class="social-links">
+            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
+            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
+        </div>
+    </div>
+    "#
+}
+
 async fn root() -> Html<&'static str> {
     Html(
         r#"
@@ -147,10 +180,7 @@ async fn create_url_form(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body {{ font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }}
-        .result {{ margin: 1rem 0; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }}
-        a {{ color: #4da6ff; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
+        {}
     </style>
 </head>
 <body>
@@ -159,10 +189,15 @@ async fn create_url_form(
         <p><strong>Short URL:</strong> <a href="{}" target="_blank">{}</a></p>
     </div>
     <a href="/">← Create Another</a>
+    
+    {}
 </body>
 </html>
             "#,
-                response.short_url, response.short_url
+                get_common_styles(),
+                response.short_url,
+                response.short_url,
+                get_footer_html()
             ))
         }
         Err(error_response) => {
@@ -177,21 +212,23 @@ async fn create_url_form(
 <head>
     <title>Error</title>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body {{ font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }}
-        .error {{ background: #3a1f1f; color: #ff6b6b; padding: 1rem; border-radius: 4px; border: 1px solid #5a2a2a; }}
-        a {{ color: #4da6ff; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
+        {}
     </style>
 </head>
 <body>
     <h1>Error</h1>
     <div class="error">{}</div>
     <a href="/">← Try Again</a>
+    
+    {}
 </body>
 </html>
             "#,
-                error_response.error
+                get_common_styles(),
+                error_response.error,
+                get_footer_html()
             ))
         }
     }
