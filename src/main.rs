@@ -148,7 +148,7 @@ async fn root() -> Html<&'static str> {
     </form>
     
     <div class="footer">
-        <div>Made with ❤️ in Taiwan</div>
+        <div>Made with 🦀 Rust and ❤️ in Taiwan</div>
         <div class="social-links">
             <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
             <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
