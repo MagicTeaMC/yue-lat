@@ -333,7 +333,7 @@ async fn redirect_url(
 
 fn generate_short_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const CODE_LENGTH: usize = 6;
+    const CODE_LENGTH: usize = 4;
 
     let mut rng = rand::rng();
     (0..CODE_LENGTH)
