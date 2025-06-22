@@ -78,14 +78,6 @@ curl -I http://localhost:3000/aBc4
 
 ## 🏗️ Architecture
 
-### Tech Stack
-- **Framework**: [Axum](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
-- **Database**: [SQLite](https://www.sqlite.org/) with [SQLx](https://github.com/launchbadge/sqlx)
-- **Templates**: [Askama](https://github.com/djc/askama) - Type-safe template engine
-- **Async Runtime**: [Tokio](https://tokio.rs/) for high-performance async I/O
-- **Logging**: [tracing](https://github.com/tokio-rs/tracing) for structured logging
-- **Serialization**: [serde](https://serde.rs/) for JSON handling
-
 ### Database Schema
 ```sql
 CREATE TABLE urls (
@@ -130,12 +122,6 @@ RUST_LOG=info
 ## 🤝 Contributing
 
 We welcome contributions! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## 📝 License
 
