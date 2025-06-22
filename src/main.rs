@@ -66,7 +66,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(root).post(create_url_form))
-        .route("/shorten", post(create_url))
+        .route("/api/v1/shorten", post(create_url))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE)) // Limit request body size

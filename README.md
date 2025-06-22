@@ -48,10 +48,10 @@ Visit `http://localhost:3000` in your browser to access the web interface. Simpl
 ### API Endpoints
 
 #### Shorten a URL
-**POST** `/shorten`
+**POST** `/api/v1/shorten`
 
 ```bash
-curl -X POST http://localhost:3000/shorten \
+curl -X POST http://localhost:3000/api/v1/shorten \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com"}'
 ```
