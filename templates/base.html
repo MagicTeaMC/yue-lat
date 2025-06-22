@@ -1,10 +1,42 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>{% block title %}URL Shortener{% endblock %}</title>
+    <title>{% block title %}Maoyue's URL Shortener{% endblock %}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
+    
+    <meta name="description" content="{% block description %}A fast, lightweight URL shortener built with Rust. {% endblock %}">
+    <meta name="keywords" content="url shortener, short links, link shortener, rust, fast">
+    <meta name="author" content="Maoyue">
+    <meta name="robots" content="index, follow">
+    
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{% block canonical_url %}https://yue.lat/{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}Maoyue's URL Shortener{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
+    <meta property="og:site_name" content="Maoyue's URL Shortener">
+    <meta property="og:locale" content="en_US">
+    
+    <meta property="twitter:url" content="{% block twitter_url %}https://yue.lat/{% endblock %}">
+    <meta property="twitter:title" content="{% block twitter_title %}Maoyue's URL Shortener{% endblock %}">
+    <meta property="twitter:description" content="{% block twitter_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
+    
+    <meta name="theme-color" content="#007bff">
+    
+    <link rel="canonical" href="{% block canonical %}https://yue.lat/{% endblock %}">
+    
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Maoyue's URL Shortener",
+      "description": "A fast, lightweight URL shortener built with Rust.",
+      "url": "https://yue.lat",
+      "applicationCategory": "WebApplication",
+      "operatingSystem": "Web",
+    }
+    </script>
+    
     <style>
         body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
         input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
@@ -28,10 +60,10 @@
     {% block content %}{% endblock %}
     
     <div class="footer">
-        <div>Made with 🦀 Rust and ❤️ in Taiwan</div>
+        <div>Made with 🦀 Rust and ❤️</div>
         <div class="social-links">
-            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank">GitHub</a>
-            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank">Discord</a>
+            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank" rel="noopener noreferrer">Discord</a>
         </div>
     </div>
 </body>
