@@ -1,3 +1,4 @@
+use anyhow::Result;
 use askama::Template;
 use axum::{
     Form, Json, Router,
@@ -9,6 +10,8 @@ use axum::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use tower::ServiceBuilder;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber;
 
 const MAX_URL_LENGTH: usize = 2048;
@@ -38,7 +41,7 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     dotenvy::dotenv_override()?;
 
@@ -63,14 +66,19 @@ async fn main() {
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+        .layer(
+            ServiceBuilder::new()
+                .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+                .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any)),
+        )
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     tracing::info!("URL Shortener listening on http://0.0.0.0:{}", port);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
@@ -160,7 +168,7 @@ async fn root() -> Result<Html<String>, StatusCode> {
 
 async fn create_url(
     State(app_state): State<AppState>,
-    Json(payload): Json<CreateUrlRequest>,
+    Json(payload): Json<CreateUrlRequest>
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
     let result = shorten_url(app_state, payload.url).await;
     match result {
@@ -308,7 +316,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
 async fn redirect_url(
     Path(short_code): Path<String>,
-    State(app_state): State<AppState>,
+    State(app_state): State<AppState>
 ) -> Result<Redirect, StatusCode> {
     if let Err(error) = validate_short_code_length(&short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);

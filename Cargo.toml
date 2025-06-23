@@ -14,3 +14,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"
 askama = "0.12"
 askama_axum = "0.4"
 dotenvy = "0.15"
+tower-http = { version = "0.6", features = ["cors"] }
+tower = "0.5"
+anyhow = "1.0"
