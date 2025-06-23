@@ -7,6 +7,7 @@ use axum::{
     response::{Html, Redirect, Response},
     routing::{get, post},
 };
+use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -20,7 +21,9 @@ const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 #[derive(Template)]
 #[template(path = "index.html")]
-struct IndexTemplate;
+struct IndexTemplate {
+    authenticity_token: String,
+}
 
 #[derive(Template)]
 #[template(path = "success.html")]
@@ -71,6 +74,7 @@ async fn main() -> Result<()> {
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
                 .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any)),
         )
+        .layer(CsrfLayer::new(CsrfConfig::default()))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
@@ -155,10 +159,13 @@ async fn favicon() -> Response {
         .unwrap()
 }
 
-async fn root() -> Result<Html<String>, StatusCode> {
-    let template = IndexTemplate;
+async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), StatusCode> {
+    let template = IndexTemplate {
+        authenticity_token: token.authenticity_token().unwrap(),
+    };
+
     match template.render() {
-        Ok(html) => Ok(Html(html)),
+        Ok(html) => Ok((token, Html(html))),
         Err(e) => {
             tracing::error!("Template rendering error: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -188,9 +195,16 @@ async fn create_url(
 }
 
 async fn create_url_form(
+    token: CsrfToken,
     State(app_state): State<AppState>,
-    Form(payload): Form<CreateUrlRequest>,
+    Form(payload): Form<CreateUrlFormRequest>
 ) -> Result<Html<String>, StatusCode> {
+
+    if token.verify(&payload.authenticity_token).is_err() {
+        tracing::warn!("CSRF token verification failed");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let result = shorten_url(app_state, payload.url).await;
 
     match result {
@@ -316,7 +330,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
 async fn redirect_url(
     Path(short_code): Path<String>,
-    State(app_state): State<AppState>
+    State(app_state): State<AppState>,
 ) -> Result<Redirect, StatusCode> {
     if let Err(error) = validate_short_code_length(&short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);
@@ -366,6 +380,12 @@ fn generate_short_code() -> String {
 #[derive(Deserialize)]
 struct CreateUrlRequest {
     url: String,
+}
+
+#[derive(Deserialize)]
+struct CreateUrlFormRequest {
+    url: String,
+    authenticity_token: String,
 }
 
 #[derive(Serialize)]

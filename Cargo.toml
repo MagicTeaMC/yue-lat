@@ -17,3 +17,4 @@ dotenvy = "0.15"
 tower-http = { version = "0.6", features = ["cors"] }
 tower = "0.5"
 anyhow = "1.0"
+axum_csrf = { version = "0.11", features = ["layer"] }
