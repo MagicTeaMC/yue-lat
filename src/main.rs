@@ -1,39 +1,29 @@
+use anyhow::Result;
 use askama::Template;
 use axum::{
-    Form, Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{StatusCode, header},
-    response::{Html, Redirect, Response},
-    routing::{get, post},
+    Json,
+    Router,
+    extract::{ DefaultBodyLimit, Path, State },
+    http::{ StatusCode, header },
+    response::{ Html, Redirect, Response },
+    routing::{ get, post },
 };
-use dotenv::dotenv;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
-use std::env;
+use serde::{ Deserialize, Serialize };
+use sqlx::{ Row, SqlitePool };
+use tower::ServiceBuilder;
+use tower_http::cors::{ Any, CorsLayer };
 use tracing_subscriber;
 
 // Constants for input validation
-const MAX_URL_LENGTH: usize = 2048; // Reasonable limit for URLs
-const MAX_SHORT_CODE_LENGTH: usize = 20; // Generous limit for short codes
-const MAX_REQUEST_SIZE: usize = 1024 * 1024; // 1MB max request size
+const MAX_URL_LENGTH: usize = 2048;
+const MAX_SHORT_CODE_LENGTH: usize = 20;
+const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 // Template structs
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate;
-
-#[derive(Template)]
-#[template(path = "success.html")]
-struct SuccessTemplate {
-    short_url: String,
-}
-
-#[derive(Template)]
-#[template(path = "error.html")]
-struct ErrorTemplate {
-    error_message: String,
-}
 
 // Shared state with SQLite connection pool
 #[derive(Clone)]
@@ -43,67 +33,70 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    dotenv().ok();
+    dotenvy::dotenv_override()?;
 
-    let port: u16 = env::var("PORT")
+    let port: u16 = dotenvy
+        ::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
         .expect("PORT must be a valid number");
 
-    let base_url = env::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
+    let base_url = dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
 
-    // Remove trailing slash if present
     let base_url = base_url.trim_end_matches('/').to_string();
 
     tracing::info!("Using base URL: {}", base_url);
 
-    // Initialize SQLite connection pool
     let db = setup_database().await.expect("Failed to setup database");
 
     let app_state = AppState { db, base_url };
 
     let app = Router::new()
-        .route("/", get(root).post(create_url_form))
+        .route("/", get(root))
         .route("/api/v1/shorten", post(create_url))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE)) // Limit request body size
+        .layer(
+            ServiceBuilder::new()
+                .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
+                .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any))
+        )
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     tracing::info!("URL Shortener listening on http://0.0.0.0:{}", port);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
     // Create connection pool with configuration
     let pool = SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::new()
+        sqlx::sqlite::SqliteConnectOptions
+            ::new()
             .filename("urls.db")
             .create_if_missing(true)
             .pragma("journal_mode", "WAL") // Enable WAL mode for better concurrency
             .pragma("synchronous", "NORMAL")
             .pragma("cache_size", "1000")
             .pragma("foreign_keys", "true")
-            .pragma("temp_store", "memory"),
-    )
-    .await?;
+            .pragma("temp_store", "memory")
+    ).await?;
 
     // Create table with length constraints
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS urls (
+    sqlx
+        ::query(
+            "CREATE TABLE IF NOT EXISTS urls (
             short_code TEXT PRIMARY KEY CHECK(length(short_code) <= 20),
             original_url TEXT NOT NULL CHECK(length(original_url) <= 2048),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )",
-    )
-    .execute(&pool)
-    .await?;
+        )"
+        )
+        .execute(&pool).await?;
 
     tracing::info!("Database pool initialized with {} connections", pool.size());
     Ok(pool)
@@ -112,20 +105,16 @@ async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
 // Input validation functions
 fn validate_url_length(url: &str) -> Result<(), String> {
     if url.len() > MAX_URL_LENGTH {
-        return Err(format!(
-            "URL too long. Maximum length is {} characters",
-            MAX_URL_LENGTH
-        ));
+        return Err(format!("URL too long. Maximum length is {} characters", MAX_URL_LENGTH));
     }
     Ok(())
 }
 
 fn validate_short_code_length(short_code: &str) -> Result<(), String> {
     if short_code.len() > MAX_SHORT_CODE_LENGTH {
-        return Err(format!(
-            "Short code too long. Maximum length is {} characters",
-            MAX_SHORT_CODE_LENGTH
-        ));
+        return Err(
+            format!("Short code too long. Maximum length is {} characters", MAX_SHORT_CODE_LENGTH)
+        );
     }
     Ok(())
 }
@@ -146,7 +135,8 @@ fn validate_url_format(url: &str) -> Result<(), String> {
 
 async fn favicon() -> Response {
     // Simple link/chain icon as SVG favicon
-    let svg_favicon = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
+    let svg_favicon =
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
         <path d="M4.5 1A1.5 1.5 0 0 0 3 2.5v3A1.5 1.5 0 0 0 4.5 7h7A1.5 1.5 0 0 0 13 5.5v-3A1.5 1.5 0 0 0 11.5 1h-7z"/>
         <path d="M11.5 9A1.5 1.5 0 0 0 10 10.5v3A1.5 1.5 0 0 0 11.5 15h3A1.5 1.5 0 0 0 16 13.5v-3A1.5 1.5 0 0 0 14.5 9h-3z"/>
         <path d="M8.854 8.146a.5.5 0 0 0-.708.708l1.5 1.5a.5.5 0 0 0 .708-.708l-1.5-1.5z"/>
@@ -173,9 +163,10 @@ async fn root() -> Result<Html<String>, StatusCode> {
 
 async fn create_url(
     State(app_state): State<AppState>,
-    Json(payload): Json<CreateUrlRequest>,
+    Json(payload): Json<CreateUrlRequest>
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
     let result = shorten_url(app_state, payload.url).await;
+
     match result {
         Ok(response) => {
             tracing::info!(
@@ -192,69 +183,20 @@ async fn create_url(
     }
 }
 
-async fn create_url_form(
-    State(app_state): State<AppState>,
-    Form(payload): Form<CreateUrlRequest>,
-) -> Result<Html<String>, StatusCode> {
-    let result = shorten_url(app_state, payload.url).await;
-
-    match result {
-        Ok(response) => {
-            tracing::info!(
-                "Created short URL via form: {} -> {}",
-                response.short_code,
-                response.original_url
-            );
-
-            let success_template = SuccessTemplate {
-                short_url: response.short_url,
-            };
-
-            match success_template.render() {
-                Ok(html) => Ok(Html(html)),
-                Err(e) => {
-                    tracing::error!("Template rendering error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-            }
-        }
-        Err(error_response) => {
-            tracing::warn!(
-                "Failed to create short URL via form: {}",
-                error_response.error
-            );
-
-            let error_template = ErrorTemplate {
-                error_message: error_response.error,
-            };
-
-            match error_template.render() {
-                Ok(html) => Ok(Html(html)),
-                Err(e) => {
-                    tracing::error!("Template rendering error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-            }
-        }
-    }
-}
-
 async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, ErrorResponse> {
-    // Validate URL length first (before any processing)
     if let Err(error) = validate_url_length(&url) {
         return Err(ErrorResponse { error });
     }
 
+    let url = url.trim().to_string();
+
     // Validate URL not empty
-    if url.trim().is_empty() {
+    if url.is_empty() {
         return Err(ErrorResponse {
             error: "URL cannot be empty".to_string(),
         });
     }
 
-    let url = url.trim().to_string();
-
-    // Validate URL format
     if let Err(error) = validate_url_format(&url) {
         return Err(ErrorResponse { error });
     }
@@ -265,7 +207,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
     loop {
         let short_code = generate_short_code();
 
-        // Validate generated short code (defensive programming)
         if let Err(error) = validate_short_code_length(&short_code) {
             tracing::error!("Generated short code validation failed: {}", error);
             return Err(ErrorResponse {
@@ -273,21 +214,19 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
             });
         }
 
-        // Check if short code already exists
-        let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
+        let exists = sqlx
+            ::query("SELECT 1 FROM urls WHERE short_code = ?")
             .bind(&short_code)
-            .fetch_optional(&app_state.db)
-            .await;
+            .fetch_optional(&app_state.db).await;
 
         match exists {
             Ok(None) => {
                 // Short code doesn't exist, try to insert
-                let result =
-                    sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
-                        .bind(&short_code)
-                        .bind(&url)
-                        .execute(&app_state.db)
-                        .await;
+                let result = sqlx
+                    ::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
+                    .bind(&short_code)
+                    .bind(&url)
+                    .execute(&app_state.db).await;
 
                 match result {
                     Ok(_) => {
@@ -328,7 +267,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
 async fn redirect_url(
     Path(short_code): Path<String>,
-    State(app_state): State<AppState>,
+    State(app_state): State<AppState>
 ) -> Result<Redirect, StatusCode> {
     // Validate short code length to prevent potential attacks
     if let Err(error) = validate_short_code_length(&short_code) {
@@ -342,10 +281,10 @@ async fn redirect_url(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let result = sqlx::query("SELECT original_url FROM urls WHERE short_code = ?")
+    let result = sqlx
+        ::query("SELECT original_url FROM urls WHERE short_code = ?")
         .bind(&short_code)
-        .fetch_optional(&app_state.db)
-        .await;
+        .fetch_optional(&app_state.db).await;
 
     match result {
         Ok(Some(row)) => {
