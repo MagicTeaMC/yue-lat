@@ -68,13 +68,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/shorten", post(create_url))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
-                .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any)),
+                .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any))
+                .layer(CsrfLayer::new(CsrfConfig::default()))
         )
-        .layer(CsrfLayer::new(CsrfConfig::default()))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
