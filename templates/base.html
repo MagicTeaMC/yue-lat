@@ -1,34 +1,30 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <title>{% block title %}Maoyue's URL Shortener{% endblock %}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-
-    <meta name="description"
-        content="{% block description %}A fast, lightweight URL shortener built with Rust. {% endblock %}">
+    
+    <meta name="description" content="{% block description %}A fast, lightweight URL shortener built with Rust. {% endblock %}">
     <meta name="keywords" content="url shortener, short links, link shortener, rust, fast">
     <meta name="author" content="Maoyue">
     <meta name="robots" content="index, follow">
-
+    
     <meta property="og:type" content="website">
     <meta property="og:url" content="{% block canonical_url %}https://yue.lat/{% endblock %}">
     <meta property="og:title" content="{% block og_title %}Maoyue's URL Shortener{% endblock %}">
-    <meta property="og:description"
-        content="{% block og_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
     <meta property="og:site_name" content="Maoyue's URL Shortener">
     <meta property="og:locale" content="en_US">
-
+    
     <meta property="twitter:url" content="{% block twitter_url %}https://yue.lat/{% endblock %}">
     <meta property="twitter:title" content="{% block twitter_title %}Maoyue's URL Shortener{% endblock %}">
-    <meta property="twitter:description"
-        content="{% block twitter_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
-
+    <meta property="twitter:description" content="{% block twitter_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
+    
     <meta name="theme-color" content="#007bff">
-
+    
     <link rel="canonical" href="{% block canonical %}https://yue.lat/{% endblock %}">
-
+    
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -40,315 +36,35 @@
       "operatingSystem": "Web",
     }
     </script>
-
+    
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
-
-        :root {
-            --default-fonts: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: var(--default-fonts);
-            max-width: 500px;
-            margin: 2rem auto;
-            padding: 1rem;
-            background: #202020;
-            color: #b0b0b0;
-        }
-
-        main {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -75%);
-            margin: auto;
-        }
-
-        h1.inter {
-            font-weight: 700;
-        }
-
-        .input-wrapper {
-            --bg-size: 200%;
-            width: 100%;
-            padding: 12px 16px;
-            margin: 0.5rem 0;
-            border: 1px solid #404040;
-            border-radius: 40px;
-            background: #2a2a2a;
-            position: relative;
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-            cursor: text;
-            overflow: hidden;
-            transition: all 300ms cubic-bezier(.4, 0, .2, 1);
-        }
-
-        input {
-            background: transparent;
-            border: none;
-            color: #e0e0e0;
-            width: calc(100% - 32px);
-            font-size: 16px;
-            padding: 0;
-            transition: all 200ms ease;
-        }
-
-        input:focus {
-            outline: none;
-            border-color: #007bff;
-        }
-
-        button {
-            background: #007bff;
-            color: white;
-            width: 32px;
-            height: 32px;
-            border: none;
-            border-radius: 40px;
-            cursor: pointer;
-            transition: all 200ms ease;
-
-            display: flex;
-            align-items: center;
-            justify-content: center;
-
-            position: absolute;
-            right: 0;
-            margin-right: 4px;
-        }
-
-        button:hover {
-            background: #0056b3;
-        }
-
-        button svg {
-            width: 22px;
-            height: 22px;
-        }
-
-        .inter {
-            font-family: "Inter", var(--default-fonts);
-            font-optical-sizing: auto;
-            font-weight: 400;
-            font-style: normal;
-        }
-
-        .result {
-            margin-top: 1rem;
-            padding: 1rem;
-            background: #2a2a2a;
-            border-radius: 4px;
-            word-break: break-all;
-            border: 1px solid #404040;
-        }
-
-        .footer {
-            position: absolute;
-            bottom: 0;
-            right: 0;
-            text-align: center;
-            width: 100%;
-        }
-
-        .footer-inner {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 20px;
-        }
-
-        .social-links {
-            display: flex;
-            justify-content: center;
-            gap: 1rem;
-            margin-top: 0.5rem;
-        }
-
-        .social-links a {
-            color: #007bff;
-            text-decoration: none;
-            padding: 0.5rem;
-            border-radius: 4px;
-            transition: background-color 0.2s;
-        }
-
-        .social-links a:hover {
-            background-color: #2a2a2a;
-        }
-
-        .social-links a::before {
-            margin-right: 0.5rem;
-        }
-
-        .github::before {
-            content: "🐙";
-        }
-
-        .discord::before {
-            content: "💬";
-        }
-
-        a {
-            color: #4da6ff;
-            text-decoration: none;
-        }
-
-        a:hover {
-            text-decoration: underline;
-        }
-
-        .error {
-            background: #3a1f1f;
-            color: #ff6b6b;
-            padding: 1rem;
-            border-radius: 4px;
-            border: 1px solid #5a2a2a;
-        }
-
-        #form-item {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        @keyframes move-bg {
-            to {
-                background-position: var(--bg-size) 0;
-            }
-        }
-
-        @keyframes slowly-adapt {
-            0% {
-                color: transparent;
-            }
-
-            30% {
-                color: transparent;
-            }
-
-            100% {
-                color: #e0e0e0;
-            }
-        }
-
-        #text {
-            --bg-size: 200%;
-            display: none;
-            animation: move-bg 2s infinite linear;
-            background: linear-gradient(90deg, #e0e0e0, rgb(41, 66, 174), #e0e0e0) 0 0 / var(--bg-size) 100%;
-            color: transparent;
-            -webkit-background-clip: text !important;
-            background-clip: text !important;
-            transition: all 200ms ease;
-        }
+        body { font-family: system-ui, sans-serif; max-width: 500px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
+        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #404040; border-radius: 4px; box-sizing: border-box; background: #2a2a2a; color: #e0e0e0; }
+        input:focus { outline: none; border-color: #007bff; }
+        button { background: #007bff; color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .result { margin-top: 1rem; padding: 1rem; background: #2a2a2a; border-radius: 4px; word-break: break-all; border: 1px solid #404040; }
+        .footer { margin-top: 2rem; text-align: center; padding-top: 1rem; border-top: 1px solid #404040; }
+        .social-links { display: flex; justify-content: center; gap: 1rem; margin-top: 0.5rem; }
+        .social-links a { color: #007bff; text-decoration: none; padding: 0.5rem; border-radius: 4px; transition: background-color 0.2s; }
+        .social-links a:hover { background-color: #2a2a2a; }
+        .social-links a::before { margin-right: 0.5rem; }
+        .github::before { content: "🐙"; }
+        .discord::before { content: "💬"; }
+        a { color: #4da6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .error { background: #3a1f1f; color: #ff6b6b; padding: 1rem; border-radius: 4px; border: 1px solid #5a2a2a; }
     </style>
 </head>
-
 <body>
-    <main>
-        {% block content %}{% endblock %}
-    </main>
-
-    <div class="footer inter">
-        <div class="footer-inner">
-            <div>Made with 🦀 Rust and ❤️</div>
-            <div class="social-links">
-                <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank"
-                    rel="noopener noreferrer">GitHub</a>
-                <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank"
-                    rel="noopener noreferrer">Discord</a>
-            </div>
+    {% block content %}{% endblock %}
+    
+    <div class="footer">
+        <div>Made with 🦀 Rust and ❤️</div>
+        <div class="social-links">
+            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="https://discord.gg/uQ4UXANnP2" class="discord" target="_blank" rel="noopener noreferrer">Discord</a>
         </div>
     </div>
-
-    <script type="module">
-        const form = document.getElementById("form-item");
-        const wrapper = document.querySelector(".input-wrapper");
-        const input = document.getElementById("input");
-        const btn = document.getElementById("btn");
-        const text = document.getElementById("text");
-
-        if (wrapper) {
-            wrapper.addEventListener("click", () => {
-                if (input)
-                    input.focus();
-            })
-        }
-
-        if (form) {
-            form.onsubmit = (event) => {
-                event.preventDefault();
-                let value = input.value;
-
-                btn.style.filter = "blur(40px)";
-                btn.style.opacity = 0;
-                btn.disabled = true;
-                btn.style.pointerEvents = "none";
-
-                text.textContent = value;
-                text.style.display = "block";
-
-                input.remove();
-                wrapper.style.border = "1px solid transparent";
-                wrapper.style.background = "transparent";
-                wrapper.style.padding = "0";
-                wrapper.style.borderRadius = "0px";
-
-                console.log(JSON.stringify({
-                    url: value
-                }));
-
-                (async () => {
-                    let results = await fetch("/api/v1/shorten", {
-                        method: "POST",
-                        body: JSON.stringify({
-                            url: value
-                        }),
-                        headers: {
-                            "Content-Type": "application/json"
-                        }
-                    });
-                    let model = await results.json();
-
-                    if (!results.ok) {
-                        text.style.filter = "blur(40px)";
-                        text.style.opacity = 0;
-                        setTimeout(() => {
-                            text.style.filter = "blur(0px)";
-                            text.style.opacity = 1;
-                            text.style.background = "red";
-                            text.textContent = "Failed to generate :("
-                        }, 200);
-                        return;
-                    }
-
-                    let shortUrl = model["short_url"];
-
-                    text.style.filter = "blur(40px)";
-                    text.style.opacity = 0;
-                    text.style.fontSize = "24px";
-
-                    // wait for the animation lol
-                    setTimeout(() => {
-                        text.textContent = shortUrl;
-                        text.style.fontWeight = 600;
-                        text.style.opacity = 1;
-                        text.style.filter = "blur(0px)";
-                        text.style.animation = "move-bg 5s infinite linear, slowly-adapt 3s forwards";
-                        text.style.background = "linear-gradient(90deg, #0894FF, #FF2E54, #FF9004, #FF2E54, #0894FF) 0 0 / var(--bg-size) 100%";
-                    }, 200);
-                })();
-            };
-        }
-    </script>
 </body>
-
 </html>
