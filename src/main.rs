@@ -6,19 +6,15 @@ use axum::{
     response::{Html, Redirect, Response},
     routing::{get, post},
 };
-use dotenv::dotenv;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::env;
 use tracing_subscriber;
 
-// Constants for input validation
-const MAX_URL_LENGTH: usize = 2048; // Reasonable limit for URLs
-const MAX_SHORT_CODE_LENGTH: usize = 20; // Generous limit for short codes
-const MAX_REQUEST_SIZE: usize = 1024 * 1024; // 1MB max request size
+const MAX_URL_LENGTH: usize = 2048;
+const MAX_SHORT_CODE_LENGTH: usize = 20;
+const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
-// Template structs
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate;
@@ -35,7 +31,6 @@ struct ErrorTemplate {
     error_message: String,
 }
 
-// Shared state with SQLite connection pool
 #[derive(Clone)]
 struct AppState {
     db: SqlitePool,
@@ -45,21 +40,19 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    dotenv().ok();
+    dotenvy::dotenv_override()?;
 
-    let port: u16 = env::var("PORT")
+    let port: u16 = dotenvy::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
         .expect("PORT must be a valid number");
 
-    let base_url = env::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
+    let base_url = dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
 
-    // Remove trailing slash if present
     let base_url = base_url.trim_end_matches('/').to_string();
 
     tracing::info!("Using base URL: {}", base_url);
 
-    // Initialize SQLite connection pool
     let db = setup_database().await.expect("Failed to setup database");
 
     let app_state = AppState { db, base_url };
@@ -69,7 +62,7 @@ async fn main() {
         .route("/api/v1/shorten", post(create_url))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE)) // Limit request body size
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -81,12 +74,11 @@ async fn main() {
 }
 
 async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
-    // Create connection pool with configuration
     let pool = SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new()
             .filename("urls.db")
             .create_if_missing(true)
-            .pragma("journal_mode", "WAL") // Enable WAL mode for better concurrency
+            .pragma("journal_mode", "WAL")
             .pragma("synchronous", "NORMAL")
             .pragma("cache_size", "1000")
             .pragma("foreign_keys", "true")
@@ -94,7 +86,6 @@ async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
     )
     .await?;
 
-    // Create table with length constraints
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS urls (
             short_code TEXT PRIMARY KEY CHECK(length(short_code) <= 20),
@@ -109,7 +100,6 @@ async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-// Input validation functions
 fn validate_url_length(url: &str) -> Result<(), String> {
     if url.len() > MAX_URL_LENGTH {
         return Err(format!(
@@ -131,12 +121,10 @@ fn validate_short_code_length(short_code: &str) -> Result<(), String> {
 }
 
 fn validate_url_format(url: &str) -> Result<(), String> {
-    // Basic URL validation
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("URL must start with http:// or https://".to_string());
     }
 
-    // Additional validation: check for reasonable URL structure
     if url.chars().any(|c| c.is_control() && c != '\t') {
         return Err("URL contains invalid control characters".to_string());
     }
@@ -145,7 +133,6 @@ fn validate_url_format(url: &str) -> Result<(), String> {
 }
 
 async fn favicon() -> Response {
-    // Simple link/chain icon as SVG favicon
     let svg_favicon = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
         <path d="M4.5 1A1.5 1.5 0 0 0 3 2.5v3A1.5 1.5 0 0 0 4.5 7h7A1.5 1.5 0 0 0 13 5.5v-3A1.5 1.5 0 0 0 11.5 1h-7z"/>
         <path d="M11.5 9A1.5 1.5 0 0 0 10 10.5v3A1.5 1.5 0 0 0 11.5 15h3A1.5 1.5 0 0 0 16 13.5v-3A1.5 1.5 0 0 0 14.5 9h-3z"/>
@@ -155,7 +142,7 @@ async fn favicon() -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/svg+xml")
-        .header(header::CACHE_CONTROL, "public, max-age=604800") // Cache for 1 week
+        .header(header::CACHE_CONTROL, "public, max-age=604800")
         .body(svg_favicon.into())
         .unwrap()
 }
@@ -240,12 +227,10 @@ async fn create_url_form(
 }
 
 async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, ErrorResponse> {
-    // Validate URL length first (before any processing)
     if let Err(error) = validate_url_length(&url) {
         return Err(ErrorResponse { error });
     }
 
-    // Validate URL not empty
     if url.trim().is_empty() {
         return Err(ErrorResponse {
             error: "URL cannot be empty".to_string(),
@@ -254,7 +239,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
     let url = url.trim().to_string();
 
-    // Validate URL format
     if let Err(error) = validate_url_format(&url) {
         return Err(ErrorResponse { error });
     }
@@ -265,7 +249,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
     loop {
         let short_code = generate_short_code();
 
-        // Validate generated short code (defensive programming)
         if let Err(error) = validate_short_code_length(&short_code) {
             tracing::error!("Generated short code validation failed: {}", error);
             return Err(ErrorResponse {
@@ -273,7 +256,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
             });
         }
 
-        // Check if short code already exists
         let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
             .bind(&short_code)
             .fetch_optional(&app_state.db)
@@ -281,7 +263,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
         match exists {
             Ok(None) => {
-                // Short code doesn't exist, try to insert
                 let result =
                     sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
                         .bind(&short_code)
@@ -307,7 +288,6 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
                 }
             }
             Ok(Some(_)) => {
-                // Short code exists, try again
                 attempts += 1;
                 if attempts >= max_attempts {
                     return Err(ErrorResponse {
@@ -330,13 +310,11 @@ async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
 ) -> Result<Redirect, StatusCode> {
-    // Validate short code length to prevent potential attacks
     if let Err(error) = validate_short_code_length(&short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Validate short code contains only expected characters
     if !short_code.chars().all(|c| c.is_alphanumeric()) {
         tracing::warn!("Invalid characters in short code: {}", short_code);
         return Err(StatusCode::BAD_REQUEST);
@@ -377,7 +355,6 @@ fn generate_short_code() -> String {
         .collect()
 }
 
-// Request/Response types with validation
 #[derive(Deserialize)]
 struct CreateUrlRequest {
     url: String,
