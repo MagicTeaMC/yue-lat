@@ -4,7 +4,7 @@ use axum::{
     Form, Json, Router,
     extract::{DefaultBodyLimit, Path, State},
     http::{StatusCode, header},
-    response::{Html, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
@@ -41,6 +41,30 @@ struct ErrorTemplate {
 struct AppState {
     db: SqlitePool,
     base_url: String,
+}
+
+struct HtmlError {
+    status: StatusCode,
+    message: String,
+}
+
+impl IntoResponse for HtmlError {
+    fn into_response(self) -> Response {
+        let template = ErrorTemplate {
+            error_message: self.message,
+        };
+
+        match template.render() {
+            Ok(html) => (self.status, Html(html)).into_response(),
+            Err(e) => {
+                tracing::error!("Failed to render error template: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error",
+                ).into_response()
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -158,7 +182,7 @@ async fn favicon() -> Response {
         .unwrap()
 }
 
-async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), StatusCode> {
+async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> {
     let template = IndexTemplate {
         authenticity_token: token.authenticity_token().unwrap(),
     };
@@ -167,7 +191,10 @@ async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), StatusCode>
         Ok(html) => Ok((token, Html(html))),
         Err(e) => {
             tracing::error!("Template rendering error: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(HtmlError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "Failed to load page. Please try again later.".to_string(),
+            })
         }
     }
 }
@@ -186,9 +213,9 @@ async fn create_url(
             );
             Ok((StatusCode::CREATED, Json(response)))
         }
-        Err(error_response) => {
+        Err((status, error_response)) => {
             tracing::warn!("Failed to create short URL: {}", error_response.error);
-            Err((StatusCode::BAD_REQUEST, Json(error_response)))
+            Err((status, Json(error_response)))
         }
     }
 }
@@ -197,11 +224,14 @@ async fn create_url_form(
     token: CsrfToken,
     State(app_state): State<AppState>,
     Form(payload): Form<CreateUrlFormRequest>
-) -> Result<Html<String>, StatusCode> {
+) -> Result<Html<String>, HtmlError> {
 
     if token.verify(&payload.authenticity_token).is_err() {
         tracing::warn!("CSRF token verification failed");
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(HtmlError {
+            status: StatusCode::FORBIDDEN,
+            message: "Invalid security token. Please refresh the page and try again.".to_string(),
+        });
     }
 
     let result = shorten_url(app_state, payload.url).await;
@@ -222,46 +252,51 @@ async fn create_url_form(
                 Ok(html) => Ok(Html(html)),
                 Err(e) => {
                     tracing::error!("Template rendering error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    Err(HtmlError {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        message: "Failed to generate success page. Please try again.".to_string(),
+                    })
                 }
             }
         }
-        Err(error_response) => {
+        Err((status, error_response)) => {
             tracing::warn!(
                 "Failed to create short URL via form: {}",
                 error_response.error
             );
 
-            let error_template = ErrorTemplate {
-                error_message: error_response.error,
-            };
-
-            match error_template.render() {
-                Ok(html) => Ok(Html(html)),
-                Err(e) => {
-                    tracing::error!("Template rendering error: {}", e);
-                    Err(StatusCode::INTERNAL_SERVER_ERROR)
-                }
-            }
+            Err(HtmlError {
+                status,
+                message: error_response.error,
+            })
         }
     }
 }
 
-async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, ErrorResponse> {
+async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     if let Err(error) = validate_url_length(&url) {
-        return Err(ErrorResponse { error });
+        return Err((
+            StatusCode::BAD_REQUEST,
+            ErrorResponse { error }
+        ));
     }
 
     if url.trim().is_empty() {
-        return Err(ErrorResponse {
-            error: "URL cannot be empty".to_string(),
-        });
+        return Err((
+            StatusCode::BAD_REQUEST,
+            ErrorResponse {
+                error: "URL cannot be empty".to_string(),
+            }
+        ));
     }
 
     let url = url.trim().to_string();
 
     if let Err(error) = validate_url_format(&url) {
-        return Err(ErrorResponse { error });
+        return Err((
+            StatusCode::BAD_REQUEST,
+            ErrorResponse { error }
+        ));
     }
 
     let mut attempts = 0;
@@ -272,9 +307,12 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 
         if let Err(error) = validate_short_code_length(&short_code) {
             tracing::error!("Generated short code validation failed: {}", error);
-            return Err(ErrorResponse {
-                error: "Internal error generating short code".to_string(),
-            });
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorResponse {
+                    error: "Internal error generating short code".to_string(),
+                }
+            ));
         }
 
         let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
@@ -302,26 +340,35 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
                     }
                     Err(e) => {
                         tracing::error!("Database error: {}", e);
-                        return Err(ErrorResponse {
-                            error: "Database error".to_string(),
-                        });
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            ErrorResponse {
+                                error: "Database error occurred. Please try again.".to_string(),
+                            }
+                        ));
                     }
                 }
             }
             Ok(Some(_)) => {
                 attempts += 1;
                 if attempts >= max_attempts {
-                    return Err(ErrorResponse {
-                        error: "Unable to generate unique short code".to_string(),
-                    });
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ErrorResponse {
+                            error: "Unable to generate unique short code. Please try again.".to_string(),
+                        }
+                    ));
                 }
                 continue;
             }
             Err(e) => {
                 tracing::error!("Database query error: {}", e);
-                return Err(ErrorResponse {
-                    error: "Database error".to_string(),
-                });
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorResponse {
+                        error: "Database error occurred. Please try again.".to_string(),
+                    }
+                ));
             }
         }
     }
@@ -330,15 +377,21 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, Er
 async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
-) -> Result<Redirect, StatusCode> {
+) -> Result<Redirect, HtmlError> {
     if let Err(error) = validate_short_code_length(&short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(HtmlError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Invalid short code format.".to_string(),
+        });
     }
 
     if !short_code.chars().all(|c| c.is_alphanumeric()) {
         tracing::warn!("Invalid characters in short code: {}", short_code);
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(HtmlError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Invalid short code format.".to_string(),
+        });
     }
 
     let result = sqlx::query("SELECT original_url FROM urls WHERE short_code = ?")
@@ -354,11 +407,17 @@ async fn redirect_url(
         }
         Ok(None) => {
             tracing::warn!("Short code not found: {}", short_code);
-            Err(StatusCode::NOT_FOUND)
+            Err(HtmlError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("Short URL '{}' not found. It may have been mistyped or doesn't exist.", short_code),
+            })
         }
         Err(e) => {
             tracing::error!("Database error: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(HtmlError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "Database error occurred. Please try again later.".to_string(),
+            })
         }
     }
 }
