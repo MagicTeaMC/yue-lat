@@ -2623,6 +2623,7 @@ dependencies = [
  "axum",
  "axum_csrf",
  "dotenvy",
+ "http",
  "rand 0.9.1",
  "serde",
  "sqlx",

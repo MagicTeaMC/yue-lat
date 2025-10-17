@@ -7,6 +7,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
+use http::Method;
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -95,7 +96,7 @@ async fn main() -> Result<()> {
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
-                .layer(CorsLayer::new().allow_headers(Any).allow_methods(Any))
+                .layer(CorsLayer::new().allow_headers(Any).allow_methods([Method::GET, Method::POST]))
                 .layer(CsrfLayer::new(CsrfConfig::default()))
         )
         .with_state(app_state);
