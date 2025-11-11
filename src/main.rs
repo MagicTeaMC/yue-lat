@@ -7,14 +7,15 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use http::Method;
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
+use http::Method;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber;
+use url::Url;
 
 const MAX_URL_LENGTH: usize = 2048;
 const MAX_SHORT_CODE_LENGTH: usize = 20;
@@ -59,10 +60,7 @@ impl IntoResponse for HtmlError {
             Ok(html) => (self.status, Html(html)).into_response(),
             Err(e) => {
                 tracing::error!("Failed to render error template: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error",
-                ).into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response()
             }
         }
     }
@@ -96,8 +94,12 @@ async fn main() -> Result<()> {
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
-                .layer(CorsLayer::new().allow_headers(Any).allow_methods([Method::GET, Method::POST]))
-                .layer(CsrfLayer::new(CsrfConfig::default()))
+                .layer(
+                    CorsLayer::new()
+                        .allow_headers(Any)
+                        .allow_methods([Method::GET, Method::POST]),
+                )
+                .layer(CsrfLayer::new(CsrfConfig::default())),
         )
         .with_state(app_state);
 
@@ -157,15 +159,15 @@ fn validate_short_code_length(short_code: &str) -> Result<(), String> {
 }
 
 fn validate_url_format(url: &str) -> Result<(), String> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
+    match Url::parse(url) {
+        Ok(parsed) => {
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err("URL scheme must be http or https".to_string());
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("Invalid URL: {}", e)),
     }
-
-    if url.chars().any(|c| c.is_control() && c != '\t') {
-        return Err("URL contains invalid control characters".to_string());
-    }
-
-    Ok(())
 }
 
 async fn favicon() -> Response {
@@ -202,7 +204,7 @@ async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> 
 
 async fn create_url(
     State(app_state): State<AppState>,
-    Json(payload): Json<CreateUrlRequest>
+    Json(payload): Json<CreateUrlRequest>,
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
     let result = shorten_url(app_state, payload.url).await;
     match result {
@@ -224,9 +226,8 @@ async fn create_url(
 async fn create_url_form(
     token: CsrfToken,
     State(app_state): State<AppState>,
-    Form(payload): Form<CreateUrlFormRequest>
+    Form(payload): Form<CreateUrlFormRequest>,
 ) -> Result<Html<String>, HtmlError> {
-
     if token.verify(&payload.authenticity_token).is_err() {
         tracing::warn!("CSRF token verification failed");
         return Err(HtmlError {
@@ -274,12 +275,12 @@ async fn create_url_form(
     }
 }
 
-async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+async fn shorten_url(
+    app_state: AppState,
+    url: String,
+) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     if let Err(error) = validate_url_length(&url) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            ErrorResponse { error }
-        ));
+        return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
 
     if url.trim().is_empty() {
@@ -287,17 +288,14 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (S
             StatusCode::BAD_REQUEST,
             ErrorResponse {
                 error: "URL cannot be empty".to_string(),
-            }
+            },
         ));
     }
 
     let url = url.trim().to_string();
 
     if let Err(error) = validate_url_format(&url) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            ErrorResponse { error }
-        ));
+        return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
 
     let mut attempts = 0;
@@ -312,7 +310,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (S
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorResponse {
                     error: "Internal error generating short code".to_string(),
-                }
+                },
             ));
         }
 
@@ -345,7 +343,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (S
                             StatusCode::INTERNAL_SERVER_ERROR,
                             ErrorResponse {
                                 error: "Database error occurred. Please try again.".to_string(),
-                            }
+                            },
                         ));
                     }
                 }
@@ -356,8 +354,9 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (S
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         ErrorResponse {
-                            error: "Unable to generate unique short code. Please try again.".to_string(),
-                        }
+                            error: "Unable to generate unique short code. Please try again."
+                                .to_string(),
+                        },
                     ));
                 }
                 continue;
@@ -368,7 +367,7 @@ async fn shorten_url(app_state: AppState, url: String) -> Result<UrlResponse, (S
                     StatusCode::INTERNAL_SERVER_ERROR,
                     ErrorResponse {
                         error: "Database error occurred. Please try again.".to_string(),
-                    }
+                    },
                 ));
             }
         }
@@ -410,7 +409,10 @@ async fn redirect_url(
             tracing::warn!("Short code not found: {}", short_code);
             Err(HtmlError {
                 status: StatusCode::NOT_FOUND,
-                message: format!("Short URL '{}' not found. It may have been mistyped or doesn't exist.", short_code),
+                message: format!(
+                    "Short URL '{}' not found. It may have been mistyped or doesn't exist.",
+                    short_code
+                ),
             })
         }
         Err(e) => {
