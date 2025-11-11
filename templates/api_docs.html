@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}API Documentation - Maoyue's URL Shortener{% endblock %}
+{% block description %}API documentation for our service. Learn how to integrate and use the API.{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 2rem;">
+    <a href="/" style="color: #4da6ff; text-decoration: none;">← Back to Home</a>
+</div>
+
+<h1>API Documentation</h1>
+
+<div style="margin-bottom: 2rem;">
+    <p>We provides a simple REST API for programmatic access. All API requests require authentication.</p>
+</div>
+
+<h2>Authentication</h2>
+<div class="result" style="margin-bottom: 2rem;">
+    <p><strong>All API requests must include an API key</strong> using one of the following methods:</p>
+    <ul style="margin: 0.5rem 0; padding-left: 1.5rem;">
+        <li><code>X-API-Key</code> header</li>
+        <li><code>Authorization: Bearer</code> header</li>
+    </ul>
+    <p style="margin-top: 1rem;">Contact me via Discord to get an API key.</p>
+</div>
+
+<h2>Base URL</h2>
+<div class="result" style="margin-bottom: 2rem;">
+    <code>https://yue.lat</code>
+</div>
+
+<h2>Endpoints</h2>
+
+<div style="margin-bottom: 2rem;">
+    <h3>POST /api/v1/shorten</h3>
+    <p>Create a shortened URL.</p>
+    
+    <h4>Request Headers</h4>
+    <div class="result">
+        <pre style="margin: 0; white-space: pre-wrap;">Content-Type: application/json
+X-API-Key: your-api-key-here</pre>
+    </div>
+
+    <h4>Request Body</h4>
+    <div class="result">
+        <pre style="margin: 0; white-space: pre-wrap;">{
+  "url": "https://example.com/very/long/url"
+}</pre>
+    </div>
+
+    <h4>Success Response (201 Created)</h4>
+    <div class="result">
+        <pre style="margin: 0; white-space: pre-wrap;">{
+  "original_url": "https://example.com/very/long/url",
+  "short_code": "aBc3",
+  "short_url": "https://yue.lat/aBc3"
+}</pre>
+    </div>
+
+    <h4>Error Responses</h4>
+    <div class="result">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid #404040;">
+                <th style="text-align: left; padding: 0.5rem;">Status Code</th>
+                <th style="text-align: left; padding: 0.5rem;">Description</th>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>400</code></td>
+                <td style="padding: 0.5rem;">Invalid URL format or URL too long</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>401</code></td>
+                <td style="padding: 0.5rem;">Missing or invalid API key</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>500</code></td>
+                <td style="padding: 0.5rem;">Internal server error</td>
+            </tr>
+        </table>
+    </div>
+
+    <h4>Error Response Format</h4>
+    <div class="result">
+        <pre style="margin: 0; white-space: pre-wrap;">{
+  "error": "Error message description"
+}</pre>
+    </div>
+</div>
+
+<h2>Example Usage</h2>
+
+<div style="margin-bottom: 2rem;">
+    <h3>cURL</h3>
+    <div class="result">
+        <pre style="margin: 0; white-space: pre-wrap;">curl -X POST https://yue.lat/api/v1/shorten \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key-here" \
+  -d '{"url": "https://example.com"}'</pre>
+    </div>
+</div>
+
+{% endblock %}

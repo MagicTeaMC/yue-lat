@@ -1,11 +1,7 @@
 use anyhow::Result;
 use askama::Template;
 use axum::{
-    Form, Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    Form, Json, Router, body::Body, extract::{DefaultBodyLimit, Path, State}, http::{Request, StatusCode, header}, middleware::{self, Next}, response::{Html, IntoResponse, Redirect, Response}, routing::{get, post}
 };
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
 use http::Method;
@@ -20,6 +16,10 @@ use url::Url;
 const MAX_URL_LENGTH: usize = 2048;
 const MAX_SHORT_CODE_LENGTH: usize = 20;
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
+
+#[derive(Template)]
+#[template(path = "api_docs.html")]
+struct ApiDocsTemplate {}
 
 #[derive(Template)]
 #[template(path = "index.html")]
@@ -43,6 +43,7 @@ struct ErrorTemplate {
 struct AppState {
     db: SqlitePool,
     base_url: String,
+    api_keys: Vec<String>,
 }
 
 struct HtmlError {
@@ -66,6 +67,45 @@ impl IntoResponse for HtmlError {
     }
 }
 
+async fn validate_api_key(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let api_key = req
+        .headers()
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            req.headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        });
+
+    match api_key {
+        Some(key) if state.api_keys.contains(&key.to_string()) => Ok(next.run(req).await),
+        Some(_) => {
+            tracing::warn!("Invalid API key attempted");
+            Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid API key".to_string(),
+                }),
+            ))
+        }
+        None => {
+            tracing::warn!("Missing API key");
+            Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "API key required. Please provide X-API-Key header or Authorization: Bearer <key>".to_string(),
+                }),
+            ))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -77,20 +117,47 @@ async fn main() -> Result<()> {
         .expect("PORT must be a valid number");
 
     let base_url = dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
-
     let base_url = base_url.trim_end_matches('/').to_string();
 
+    let api_keys_str = dotenvy::var("API_KEYS").expect("API_KEYS environment variable must be set");
+
+    let api_keys: Vec<String> = api_keys_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if api_keys.is_empty() {
+        panic!("At least one API key must be configured in API_KEYS");
+    }
+
+    tracing::info!("Loaded {} API key(s)", api_keys.len());
     tracing::info!("Using base URL: {}", base_url);
 
     let db = setup_database().await.expect("Failed to setup database");
 
-    let app_state = AppState { db, base_url };
+    let app_state = AppState {
+        db,
+        base_url,
+        api_keys,
+    };
+
+    let public_routes = Router::new()
+        .route("/", get(root).post(create_url_form))
+        .route("/api/v1", get(api_docs))
+        .route("/favicon.ico", get(favicon))
+        .route("/{short_code}", get(redirect_url));
+
+    let api_routes = Router::new()
+        .route("/api/v1/shorten", post(create_url))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            validate_api_key,
+        ));
 
     let app = Router::new()
-        .route("/", get(root).post(create_url_form))
-        .route("/api/v1/shorten", post(create_url))
-        .route("/favicon.ico", get(favicon))
-        .route("/{short_code}", get(redirect_url))
+        .merge(public_routes)
+        .merge(api_routes)
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
@@ -192,6 +259,21 @@ async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> 
 
     match template.render() {
         Ok(html) => Ok((token, Html(html))),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            Err(HtmlError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "Failed to load page. Please try again later.".to_string(),
+            })
+        }
+    }
+}
+
+async fn api_docs() -> Result<Html<String>, HtmlError> {
+    let template = ApiDocsTemplate {};
+
+    match template.render() {
+        Ok(html) => Ok(Html(html)),
         Err(e) => {
             tracing::error!("Template rendering error: {}", e);
             Err(HtmlError {
