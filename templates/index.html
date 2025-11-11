@@ -2,10 +2,26 @@
 {% block content %}
 <h1>Maoyue's URL Shortener</h1>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<form method="post">
+<form method="post" id="shorten-form">
     <input type="hidden" name="authenticity_token" value="{{ authenticity_token }}">
     <input type="url" name="url" placeholder="https://example.com" required>
-    <div class="cf-turnstile" data-sitekey="0x4AAAAAACAV1uL_NIL3TouQ" data-theme="dark"></div>
-    <button type="submit">Shorten</button>
+    <div class="cf-turnstile" data-sitekey="0x4AAAAAACAV1uL_NIL3TouQ" data-theme="dark" data-callback="onTurnstileSuccess"></div>
+    <button type="submit" id="submit-btn" disabled>Shorten</button>
 </form>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const submitBtn = document.getElementById('submit-btn');
+        const form = document.getElementById('shorten-form');
+        
+        form.addEventListener('submit', function(e) {
+            if (submitBtn.disabled) {
+                e.preventDefault();
+            }
+        });
+    });
+
+    window.onTurnstileSuccess = function(token) {
+        document.getElementById('submit-btn').disabled = false;
+    };
+</script>
 {% endblock %}
