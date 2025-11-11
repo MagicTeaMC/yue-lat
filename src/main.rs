@@ -1,12 +1,20 @@
 use anyhow::Result;
 use askama::Template;
 use axum::{
-    Form, Json, Router, body::Body, extract::{DefaultBodyLimit, Path, State}, http::{Request, StatusCode, header}, middleware::{self, Next}, response::{Html, IntoResponse, Redirect, Response}, routing::{get, post}
+    Form, Json, Router,
+    body::Body,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{Request, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
 };
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
 use http::Method;
 use rand::Rng;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
@@ -44,6 +52,7 @@ struct AppState {
     db: SqlitePool,
     base_url: String,
     api_keys: Vec<String>,
+    turnstile_secret: String,
 }
 
 struct HtmlError {
@@ -130,7 +139,7 @@ async fn main() -> Result<()> {
     if api_keys.is_empty() {
         panic!("At least one API key must be configured in API_KEYS");
     }
-
+    let turnstile_secret = dotenvy::var("TURNSTILE_SECRET").expect("TURNSTILE_SECRET must be set");
     tracing::info!("Loaded {} API key(s)", api_keys.len());
     tracing::info!("Using base URL: {}", base_url);
 
@@ -140,6 +149,7 @@ async fn main() -> Result<()> {
         db,
         base_url,
         api_keys,
+        turnstile_secret,
     };
 
     let public_routes = Router::new()
@@ -236,14 +246,12 @@ fn validate_url_format(url: &str) -> Result<(), String> {
         Err(e) => Err(format!("Invalid URL: {}", e)),
     }
 }
-
 async fn favicon() -> Response {
     let svg_favicon = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
         <path d="M4.5 1A1.5 1.5 0 0 0 3 2.5v3A1.5 1.5 0 0 0 4.5 7h7A1.5 1.5 0 0 0 13 5.5v-3A1.5 1.5 0 0 0 11.5 1h-7z"/>
         <path d="M11.5 9A1.5 1.5 0 0 0 10 10.5v3A1.5 1.5 0 0 0 11.5 15h3A1.5 1.5 0 0 0 16 13.5v-3A1.5 1.5 0 0 0 14.5 9h-3z"/>
         <path d="M8.854 8.146a.5.5 0 0 0-.708.708l1.5 1.5a.5.5 0 0 0 .708-.708l-1.5-1.5z"/>
     </svg>"##;
-
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/svg+xml")
@@ -251,12 +259,10 @@ async fn favicon() -> Response {
         .body(svg_favicon.into())
         .unwrap()
 }
-
 async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> {
     let template = IndexTemplate {
         authenticity_token: token.authenticity_token().unwrap(),
     };
-
     match template.render() {
         Ok(html) => Ok((token, Html(html))),
         Err(e) => {
@@ -268,10 +274,8 @@ async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> 
         }
     }
 }
-
 async fn api_docs() -> Result<Html<String>, HtmlError> {
     let template = ApiDocsTemplate {};
-
     match template.render() {
         Ok(html) => Ok(Html(html)),
         Err(e) => {
@@ -283,7 +287,6 @@ async fn api_docs() -> Result<Html<String>, HtmlError> {
         }
     }
 }
-
 async fn create_url(
     State(app_state): State<AppState>,
     Json(payload): Json<CreateUrlRequest>,
@@ -304,7 +307,6 @@ async fn create_url(
         }
     }
 }
-
 async fn create_url_form(
     token: CsrfToken,
     State(app_state): State<AppState>,
@@ -317,9 +319,16 @@ async fn create_url_form(
             message: "Invalid security token. Please refresh the page and try again.".to_string(),
         });
     }
-
+    let verification =
+        verify_turnstile(&app_state.turnstile_secret, &payload.turnstile_response).await;
+    if let Err(error_message) = verification {
+        tracing::warn!("Turnstile verification failed: {}", error_message);
+        return Err(HtmlError {
+            status: StatusCode::BAD_REQUEST,
+            message: error_message,
+        });
+    }
     let result = shorten_url(app_state, payload.url).await;
-
     match result {
         Ok(response) => {
             tracing::info!(
@@ -327,11 +336,9 @@ async fn create_url_form(
                 response.short_code,
                 response.original_url
             );
-
             let success_template = SuccessTemplate {
                 short_url: response.short_url,
             };
-
             match success_template.render() {
                 Ok(html) => Ok(Html(html)),
                 Err(e) => {
@@ -348,7 +355,6 @@ async fn create_url_form(
                 "Failed to create short URL via form: {}",
                 error_response.error
             );
-
             Err(HtmlError {
                 status,
                 message: error_response.error,
@@ -356,7 +362,6 @@ async fn create_url_form(
         }
     }
 }
-
 async fn shorten_url(
     app_state: AppState,
     url: String,
@@ -364,7 +369,6 @@ async fn shorten_url(
     if let Err(error) = validate_url_length(&url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
-
     if url.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -373,19 +377,14 @@ async fn shorten_url(
             },
         ));
     }
-
     let url = url.trim().to_string();
-
     if let Err(error) = validate_url_format(&url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
-
     let mut attempts = 0;
     let max_attempts = 10;
-
     loop {
         let short_code = generate_short_code();
-
         if let Err(error) = validate_short_code_length(&short_code) {
             tracing::error!("Generated short code validation failed: {}", error);
             return Err((
@@ -395,12 +394,10 @@ async fn shorten_url(
                 },
             ));
         }
-
         let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
             .bind(&short_code)
             .fetch_optional(&app_state.db)
             .await;
-
         match exists {
             Ok(None) => {
                 let result =
@@ -409,7 +406,6 @@ async fn shorten_url(
                         .bind(&url)
                         .execute(&app_state.db)
                         .await;
-
                 match result {
                     Ok(_) => {
                         let response = UrlResponse {
@@ -455,7 +451,6 @@ async fn shorten_url(
         }
     }
 }
-
 async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
@@ -467,7 +462,6 @@ async fn redirect_url(
             message: "Invalid short code format.".to_string(),
         });
     }
-
     if !short_code.chars().all(|c| c.is_alphanumeric()) {
         tracing::warn!("Invalid characters in short code: {}", short_code);
         return Err(HtmlError {
@@ -475,12 +469,10 @@ async fn redirect_url(
             message: "Invalid short code format.".to_string(),
         });
     }
-
     let result = sqlx::query("SELECT original_url FROM urls WHERE short_code = ?")
         .bind(&short_code)
         .fetch_optional(&app_state.db)
         .await;
-
     match result {
         Ok(Some(row)) => {
             let original_url: String = row.get("original_url");
@@ -506,7 +498,6 @@ async fn redirect_url(
         }
     }
 }
-
 fn generate_short_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const CODE_LENGTH: usize = 4;
@@ -519,25 +510,50 @@ fn generate_short_code() -> String {
         })
         .collect()
 }
-
+async fn verify_turnstile(secret: &str, token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err("Missing Captcha token".to_string());
+    }
+    let client = Client::new();
+    let mut params = std::collections::HashMap::new();
+    params.insert("secret", secret);
+    params.insert("response", token);
+    let res = client
+        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send verification request: {}", e))?;
+    let json: Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    if json["success"].as_bool().unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Captcha verification failed: {:?}",
+            json["error-codes"]
+        ))
+    }
+}
 #[derive(Deserialize)]
 struct CreateUrlRequest {
     url: String,
 }
-
 #[derive(Deserialize)]
 struct CreateUrlFormRequest {
     url: String,
     authenticity_token: String,
+    #[serde(rename = "cf-turnstile-response")]
+    turnstile_response: String,
 }
-
 #[derive(Serialize)]
 struct UrlResponse {
     original_url: String,
     short_code: String,
     short_url: String,
 }
-
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
