@@ -532,8 +532,7 @@ async fn verify_turnstile(secret: &str, token: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Captcha verification failed: {:?}",
-            json["error-codes"]
+            "Captcha verification failed"
         ))
     }
 }
