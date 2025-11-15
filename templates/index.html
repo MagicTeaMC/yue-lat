@@ -1,27 +1,43 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Maoyue's URL Shortener</h1>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<script type="module" src="/static/altcha.js"></script>
 <form method="post" id="shorten-form">
     <input type="hidden" name="authenticity_token" value="{{ authenticity_token }}">
     <input type="url" name="url" placeholder="https://example.com/very/long/url" required>
-    <div class="cf-turnstile" data-sitekey="0x4AAAAAACAV1uL_NIL3TouQ" data-theme="dark" data-callback="onTurnstileSuccess"></div>
+    <div style="margin: 1rem 0;">
+        <altcha-widget
+            challengeurl="data:application/json;base64,{{ altcha_challenge }}"
+            hidefooter="false"
+            hidelogo="false"
+            name="altcha"
+            strings='{"label":"Verify you are human","verified":"Verified","verifying":"Verifying...","error":"Verification failed","expired":"Verification expired"}'
+        ></altcha-widget>
+    </div>
     <button type="submit" id="submit-btn" disabled>Shorten</button>
 </form>
 <script>
     document.addEventListener('DOMContentLoaded', function() {
         const submitBtn = document.getElementById('submit-btn');
         const form = document.getElementById('shorten-form');
+        const altchaWidget = document.querySelector('altcha-widget');
+        
+        if (altchaWidget) {
+            altchaWidget.addEventListener('statechange', (event) => {
+                if (event.detail.state === 'verified') {
+                    submitBtn.disabled = false;
+                } else {
+                    submitBtn.disabled = true;
+                }
+            });
+        }
         
         form.addEventListener('submit', function(e) {
             if (submitBtn.disabled) {
                 e.preventDefault();
+                alert('Please complete the verification first');
             }
         });
     });
-
-    window.onTurnstileSuccess = function(token) {
-        document.getElementById('submit-btn').disabled = false;
-    };
 </script>
 {% endblock %}

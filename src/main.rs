@@ -1,3 +1,4 @@
+use altcha_lib_rs::ChallengeOptions;
 use anyhow::Result;
 use askama::Template;
 use axum::{
@@ -10,11 +11,12 @@ use axum::{
     routing::{get, post},
 };
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
+use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
+use chrono::Utc;
 use http::Method;
 use rand::Rng;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
@@ -33,6 +35,7 @@ struct ApiDocsTemplate {}
 #[template(path = "index.html")]
 struct IndexTemplate {
     authenticity_token: String,
+    altcha_challenge: String,
 }
 
 #[derive(Template)]
@@ -52,7 +55,7 @@ struct AppState {
     db: SqlitePool,
     base_url: String,
     api_keys: Vec<String>,
-    turnstile_secret: String,
+    altcha_secret: String,
 }
 
 struct HtmlError {
@@ -139,7 +142,8 @@ async fn main() -> Result<()> {
     if api_keys.is_empty() {
         panic!("At least one API key must be configured in API_KEYS");
     }
-    let turnstile_secret = dotenvy::var("TURNSTILE_SECRET").expect("TURNSTILE_SECRET must be set");
+
+    let altcha_secret = dotenvy::var("ALTCHA_SECRET").expect("ALTCHA_SECRET must be set");
     tracing::info!("Loaded {} API key(s)", api_keys.len());
     tracing::info!("Using base URL: {}", base_url);
 
@@ -149,14 +153,15 @@ async fn main() -> Result<()> {
         db,
         base_url,
         api_keys,
-        turnstile_secret,
+        altcha_secret,
     };
 
     let public_routes = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
         .route("/favicon.ico", get(favicon))
-        .route("/{short_code}", get(redirect_url));
+        .route("/{short_code}", get(redirect_url))
+        .route("/static/altcha.js", get(altcha_js));
 
     let api_routes = Router::new()
         .route("/api/v1/shorten", post(create_url))
@@ -246,6 +251,7 @@ fn validate_url_format(url: &str) -> Result<(), String> {
         Err(e) => Err(format!("Invalid URL: {}", e)),
     }
 }
+
 async fn favicon() -> Response {
     let svg_favicon = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="#007bff">
         <path d="M4.5 1A1.5 1.5 0 0 0 3 2.5v3A1.5 1.5 0 0 0 4.5 7h7A1.5 1.5 0 0 0 13 5.5v-3A1.5 1.5 0 0 0 11.5 1h-7z"/>
@@ -259,10 +265,50 @@ async fn favicon() -> Response {
         .body(svg_favicon.into())
         .unwrap()
 }
-async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> {
+
+async fn altcha_js() -> impl IntoResponse {
+    let js_content = include_str!("../static/altcha.js");
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        js_content,
+    )
+}
+
+async fn root(
+    token: CsrfToken,
+    State(app_state): State<AppState>,
+) -> Result<(CsrfToken, Html<String>), HtmlError> {
+    let challenge = altcha_lib_rs::create_challenge(ChallengeOptions {
+        hmac_key: &app_state.altcha_secret,
+        expires: Some(Utc::now() + chrono::TimeDelta::minutes(5)),
+        ..Default::default()
+    })
+    .map_err(|e| {
+        tracing::error!("Failed to create ALTCHA challenge: {:?}", e);
+        HtmlError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Failed to generate challenge. Please try again.".to_string(),
+        }
+    })?;
+
+    let challenge_json = serde_json::to_string(&challenge).map_err(|e| {
+        tracing::error!("Failed to serialize challenge: {}", e);
+        HtmlError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Failed to generate challenge. Please try again.".to_string(),
+        }
+    })?;
+
+    let challenge_base64 = BASE64_STANDARD.encode(challenge_json.as_bytes());
+
     let template = IndexTemplate {
         authenticity_token: token.authenticity_token().unwrap(),
+        altcha_challenge: challenge_base64,
     };
+
     match template.render() {
         Ok(html) => Ok((token, Html(html))),
         Err(e) => {
@@ -274,6 +320,7 @@ async fn root(token: CsrfToken) -> Result<(CsrfToken, Html<String>), HtmlError> 
         }
     }
 }
+
 async fn api_docs() -> Result<Html<String>, HtmlError> {
     let template = ApiDocsTemplate {};
     match template.render() {
@@ -287,6 +334,7 @@ async fn api_docs() -> Result<Html<String>, HtmlError> {
         }
     }
 }
+
 async fn create_url(
     State(app_state): State<AppState>,
     Json(payload): Json<CreateUrlRequest>,
@@ -307,6 +355,7 @@ async fn create_url(
         }
     }
 }
+
 async fn create_url_form(
     token: CsrfToken,
     State(app_state): State<AppState>,
@@ -319,15 +368,16 @@ async fn create_url_form(
             message: "Invalid security token. Please refresh the page and try again.".to_string(),
         });
     }
-    let verification =
-        verify_turnstile(&app_state.turnstile_secret, &payload.turnstile_response).await;
+
+    let verification = verify_altcha(&app_state.altcha_secret, &payload.altcha).await;
     if let Err(error_message) = verification {
-        tracing::warn!("Turnstile verification failed: {}", error_message);
+        tracing::warn!("ALTCHA verification failed: {}", error_message);
         return Err(HtmlError {
             status: StatusCode::BAD_REQUEST,
             message: error_message,
         });
     }
+
     let result = shorten_url(app_state, payload.url).await;
     match result {
         Ok(response) => {
@@ -362,6 +412,7 @@ async fn create_url_form(
         }
     }
 }
+
 async fn shorten_url(
     app_state: AppState,
     url: String,
@@ -451,6 +502,7 @@ async fn shorten_url(
         }
     }
 }
+
 async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
@@ -498,6 +550,7 @@ async fn redirect_url(
         }
     }
 }
+
 fn generate_short_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const CODE_LENGTH: usize = 4;
@@ -510,49 +563,44 @@ fn generate_short_code() -> String {
         })
         .collect()
 }
-async fn verify_turnstile(secret: &str, token: &str) -> Result<(), String> {
-    if token.is_empty() {
-        return Err("Missing Captcha token".to_string());
+
+async fn verify_altcha(secret: &str, payload: &str) -> Result<(), String> {
+    if payload.is_empty() {
+        return Err("Missing CAPTCHA response".to_string());
     }
-    let client = Client::new();
-    let mut params = std::collections::HashMap::new();
-    params.insert("secret", secret);
-    params.insert("response", token);
-    let res = client
-        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send verification request: {}", e))?;
-    let json: Value = res
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
-    if json["success"].as_bool().unwrap_or(false) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Captcha verification failed"
-        ))
-    }
+
+    let decoded_payload = BASE64_STANDARD
+        .decode(payload)
+        .map_err(|_| format!("CAPTCHA verification failed"))?;
+
+    let string_payload = std::str::from_utf8(&decoded_payload)
+        .map_err(|_| format!("CAPTCHA verification failed"))?;
+
+    altcha_lib_rs::verify_json_solution(string_payload, secret, true)
+        .map_err(|_| format!("CAPTCHA verification failed"))?;
+
+    Ok(())
 }
+
 #[derive(Deserialize)]
 struct CreateUrlRequest {
     url: String,
 }
+
 #[derive(Deserialize)]
 struct CreateUrlFormRequest {
     url: String,
     authenticity_token: String,
-    #[serde(rename = "cf-turnstile-response")]
-    turnstile_response: String,
+    altcha: String,
 }
+
 #[derive(Serialize)]
 struct UrlResponse {
     original_url: String,
     short_code: String,
     short_url: String,
 }
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
