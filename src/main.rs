@@ -283,6 +283,7 @@ async fn root(
 ) -> Result<(CsrfToken, Html<String>), HtmlError> {
     let challenge = altcha_lib_rs::create_challenge(ChallengeOptions {
         hmac_key: &app_state.altcha_secret,
+        max_number: Some(100_000),
         expires: Some(Utc::now() + chrono::TimeDelta::minutes(5)),
         ..Default::default()
     })
