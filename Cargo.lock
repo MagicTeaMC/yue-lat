@@ -45,9 +45,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "altcha-lib-rs"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9d360477cc959a87994183e21753b472d643c115e245a2e319f14cb240632a2"
+checksum = "489a4480470b1f7eaab9ef05e87a61f32379dd507e8a2a811ffb2734ad59a663"
 dependencies = [
  "base16ct",
  "chrono",
