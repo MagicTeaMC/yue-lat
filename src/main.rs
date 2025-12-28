@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing_subscriber;
 use url::Url;
 
@@ -156,12 +157,14 @@ async fn main() -> Result<()> {
         altcha_secret,
     };
 
+    let static_service = ServeDir::new("static").append_index_html_on_directories(false);
+
     let public_routes = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
         .route("/favicon.ico", get(favicon))
         .route("/{short_code}", get(redirect_url))
-        .route("/static/altcha.js", get(altcha_js));
+        .nest_service("/static", static_service);
 
     let api_routes = Router::new()
         .route("/api/v1/shorten", post(create_url))
@@ -264,17 +267,6 @@ async fn favicon() -> Response {
         .header(header::CACHE_CONTROL, "public, max-age=604800")
         .body(svg_favicon.into())
         .unwrap()
-}
-
-async fn altcha_js() -> impl IntoResponse {
-    let js_content = include_str!("../static/altcha.js");
-    (
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-        ],
-        js_content,
-    )
 }
 
 async fn root(

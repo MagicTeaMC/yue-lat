@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Maoyue's URL Shortener</h1>
-<script type="module" src="/static/altcha.js"></script>
+<script type="module" src="/static/altcha.min.js"></script>
 <form method="post" id="shorten-form">
     <input type="hidden" name="authenticity_token" value="{{ authenticity_token }}">
     <input type="url" name="url" placeholder="https://example.com/very/long/url" required>

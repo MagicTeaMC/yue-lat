@@ -5,45 +5,106 @@
 <h1>URL Shortened</h1>
 
 <div class="result">
-    <p>
-        <strong>Short URL:</strong>
-        <span class="url-container">
-            <a href="{{ short_url }}" target="_blank" rel="noopener">
-                {{ short_url }}
-            </a>
-            <button class="copy-btn"
-                    onclick="copyToClipboard('{{ short_url }}', this)"
-                    aria-label="Copy short URL">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" stroke-width="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4
-                             a2 2 0 0 1 2-2h9
-                             a2 2 0 0 1 2 2v1">
-                    </path>
-                </svg>
-            </button>
-        </span>
-    </p>
+
+    <div class="result-header">
+        <p>
+            <strong>Short URL:</strong>
+            <span class="url-container">
+                <a href="{{ short_url }}" target="_blank" rel="noopener">
+                    {{ short_url }}
+                </a>
+                <button class="copy-btn"
+                        onclick="copyToClipboard('{{ short_url }}', this)"
+                        aria-label="Copy short URL">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4
+                                 a2 2 0 0 1 2-2h9
+                                 a2 2 0 0 1 2 2v1">
+                        </path>
+                    </svg>
+                </button>
+            </span>
+        </p>
+    </div>
+
+    <div class="qr-toggle">
+        <button id="toggle-qr" class="qr-toggle-btn" aria-expanded="false">
+            Show QR ▾
+        </button>
+    </div>
+
+    <div id="qr-wrapper" hidden>
+        <div id="qr-container"></div>
+    </div>
+
 </div>
+
 <a href="/">← Create Another</a>
 
+<script src="/static/qrcode.min.js"></script>
+
 <script>
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(function() {
-        const btn = event.target.closest('.copy-btn');
-        const originalContent = btn.innerHTML;
-        btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+function copyToClipboard(text, el) {
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = el;
+        const original = btn.innerHTML;
+
+        btn.innerHTML =
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
+            'stroke="currentColor" stroke-width="2">' +
+            '<polyline points="20 6 9 17 4 12"></polyline>' +
+            '</svg>';
+
         btn.style.color = '#28a745';
+
         setTimeout(() => {
-            btn.innerHTML = originalContent;
+            btn.innerHTML = original;
             btn.style.color = '';
         }, 1500);
     });
 }
+
+(function () {
+    const toggleBtn = document.getElementById('toggle-qr');
+    const wrapper = document.getElementById('qr-wrapper');
+    const container = document.getElementById('qr-container');
+
+    let generated = false;
+
+    toggleBtn.addEventListener('click', () => {
+        const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+
+        if (!expanded && !generated) {
+            new QRCode(container, {
+                text: "{{ short_url }}",
+                width: 150,
+                height: 150,
+                correctLevel: QRCode.CorrectLevel.M
+            });
+            generated = true;
+        }
+
+        toggleBtn.setAttribute('aria-expanded', String(!expanded));
+        toggleBtn.textContent = expanded ? 'Show QR ▾' : 'Hide QR ▴';
+        wrapper.toggleAttribute('hidden');
+    });
+})();
 </script>
 
 <style>
+.result {
+    background: #2a2a2a;
+    border: 1px solid #404040;
+    padding: 1rem;
+    border-radius: 6px;
+}
+
+.result-header p {
+    margin-top: 0;
+}
+
 .url-container {
     display: inline-flex;
     align-items: center;
@@ -69,8 +130,38 @@ function copyToClipboard(text) {
     background: #3a3a3a;
     border-color: #007bff;
 }
-.copy-btn svg {
-    display: block;
+
+.qr-toggle {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #404040;
+}
+
+.qr-toggle-btn {
+    background: transparent;
+    border: none;
+    color: #9aa4b2;
+    cursor: pointer;
+    padding: 0;
+    font-size: 0.9rem;
+}
+
+.qr-toggle-btn:hover {
+    color: #e0e0e0;
+}
+
+#qr-wrapper {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #404040;
+}
+
+#qr-container {
+    display: inline-block;
+    padding: 6px;
+    background: #ffffff;
+    border-radius: 4px;
 }
 </style>
+
 {% endblock %}
