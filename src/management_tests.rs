@@ -1335,13 +1335,18 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     assert_eq!(created.status(), StatusCode::OK);
     assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
     let html = html_body(created).await;
-    let token = html
-        .split_once("id=\"edit-token\">")
+    assert!(html.contains("<title>URL Shortened - QuickGo</title>"));
+    assert!(html.contains("<details class=\"success-disclosure\" id=\"qr-details\">"));
+    assert!(html.contains("<details class=\"success-disclosure\" id=\"token-details\">"));
+    let token_field = html
+        .split_once("id=\"edit-token\"")
         .unwrap()
         .1
-        .split('<')
+        .split('>')
         .next()
         .unwrap();
+    assert!(token_field.contains("type=\"password\" readonly"));
+    let token = input_value(token_field, "value=\"");
     assert!(token.starts_with("qke_"));
     assert!(html.contains("src=\"/static/qrcode.min.js\""));
     let code: String = sqlx::query_scalar("SELECT short_code FROM urls WHERE edit_token_hash = ?")
@@ -1353,8 +1358,10 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let protected = html_body(request(app.clone(), &url).await).await;
     assert!(!protected.contains(token));
     assert!(protected.contains("Report abuse:"));
+    assert!(protected.contains("<title>Password Required - QuickGo</title>"));
     db::revoke_link(&state.db, &code, "abuse").await.unwrap();
     let revoked = html_body(request(app, &url).await).await;
     assert!(!revoked.contains(token));
     assert!(revoked.contains("Report abuse:"));
+    assert!(revoked.contains("<title>Link Revoked - QuickGo</title>"));
 }

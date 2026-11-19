@@ -5,6 +5,7 @@
 <meta property="twitter:url" content="{{ base_url }}/">
 {% endblock %}
 {% block footer_notice %}{% include "report_abuse.html" %}{% endblock %}
+{% block nav_home %}aria-current="page"{% endblock %}
 {% block content %}
 <h1>QuickGo</h1>
 <script type="module" src="/static/altcha.min.js"></script>
@@ -23,7 +24,6 @@
     {% include "form_security.html" %}
     <button type="submit" id="submit-btn" disabled>Shorten</button>
 </form>
-<p><a href="/edit">Manage a link</a></p>
 <script>
     document.addEventListener('DOMContentLoaded', function() {
         const submitBtn = document.getElementById('submit-btn');
