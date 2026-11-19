@@ -21,7 +21,7 @@ use clap::Parser;
 use http::Method;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use std::net::{IpAddr, SocketAddr};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
@@ -441,6 +441,7 @@ async fn create_url_form(
         CreateUrlRequest {
             url: payload.url,
             expires_at: parse_form_expiration(&payload.expires_at).map_err(HtmlError::from)?,
+            max_visits: parse_form_max_visits(&payload.max_visits)?,
         },
         Some(challenge),
     )
@@ -494,7 +495,7 @@ async fn shorten_url_with_challenge(
         &app_state,
         CreateUrlRequest {
             url,
-            expires_at: None,
+            ..Default::default()
         },
         challenge,
     )
@@ -525,6 +526,28 @@ fn validate_expiration(expires_at: Option<i64>) -> Result<(), (StatusCode, Error
     Ok(())
 }
 
+fn parse_form_max_visits(input: &str) -> Result<Option<i64>, (StatusCode, ErrorResponse)> {
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    input.trim().parse().map(Some).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "Maximum uses must be a positive integer",
+        )
+    })
+}
+
+fn validate_max_visits(max_visits: Option<i64>) -> Result<(), (StatusCode, ErrorResponse)> {
+    if max_visits.is_some_and(|max| max <= 0) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Maximum uses must be a positive integer",
+        ));
+    }
+    Ok(())
+}
+
 async fn create_link(
     app_state: &AppState,
     mut payload: CreateUrlRequest,
@@ -532,6 +555,7 @@ async fn create_link(
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     payload.url = normalize_destination(&payload.url, &app_state.base_url)?;
     validate_expiration(payload.expires_at)?;
+    validate_max_visits(payload.max_visits)?;
     store_url(app_state, payload, generate_short_code, challenge).await
 }
 
@@ -583,7 +607,7 @@ async fn store_url_with_generator(
         app_state,
         CreateUrlRequest {
             url,
-            expires_at: None,
+            ..Default::default()
         },
         &mut generate,
         None,
@@ -656,12 +680,13 @@ async fn store_url(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
         })?;
         match sqlx::query(
-            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&short_code)
         .bind(&payload.url)
         .bind(db::hash_key(&edit_token))
         .bind(payload.expires_at)
+        .bind(payload.max_visits)
         .execute(&mut *tx)
         .await
         {
@@ -685,16 +710,38 @@ async fn store_url(
 }
 
 async fn redirect_url(
+    method: Method,
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
 ) -> Result<Response, HtmlError> {
-    if is_reserved(&short_code) {
+    validate_redirect_code(&short_code)?;
+    for _ in 0..3 {
+        let link = redirect_target(&app_state.db, &short_code).await?;
+        if let Some(response) = link.unavailable()? {
+            return Ok(response);
+        }
+        let response = link.redirect(StatusCode::FOUND)?;
+        if method == Method::HEAD
+            || link.max_visits.is_none()
+            || link.consume_visit(&app_state.db, &short_code).await?
+        {
+            return Ok(response);
+        }
+    }
+    Err(HtmlError {
+        status: StatusCode::CONFLICT,
+        message: "The link changed. Please try again.".into(),
+    })
+}
+
+fn validate_redirect_code(short_code: &str) -> Result<(), HtmlError> {
+    if is_reserved(short_code) {
         return Err(HtmlError {
             status: StatusCode::NOT_FOUND,
             message: "Page not found".into(),
         });
     }
-    if let Err(error) = validate_short_code_length(&short_code) {
+    if let Err(error) = validate_short_code_length(short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);
         return Err(HtmlError {
             status: StatusCode::BAD_REQUEST,
@@ -702,67 +749,88 @@ async fn redirect_url(
         });
     }
     if short_code.is_empty() || !short_code.bytes().all(|c| c.is_ascii_alphanumeric()) {
-        tracing::warn!("Invalid characters in short code: {}", short_code);
         return Err(HtmlError {
             status: StatusCode::BAD_REQUEST,
             message: "Invalid short code format.".to_string(),
         });
     }
-    let result =
-        sqlx::query("SELECT original_url, revoked_at, expires_at FROM urls WHERE short_code = ?")
-            .bind(&short_code)
-            .fetch_optional(&app_state.db)
-            .await;
-    match result {
-        Ok(Some(row)) => {
-            if row.get::<Option<String>, _>("revoked_at").is_some() {
-                let html = RevokedTemplate {}.render().map_err(|_| HtmlError {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    message: "Unable to load page".into(),
-                })?;
-                return Ok((
-                    StatusCode::GONE,
-                    [(header::CACHE_CONTROL, "no-store")],
-                    Html(html),
-                )
-                    .into_response());
-            }
-            if row
-                .get::<Option<i64>, _>("expires_at")
-                .is_some_and(|expires_at| expires_at <= Utc::now().timestamp())
-            {
-                return Err(HtmlError {
-                    status: StatusCode::GONE,
-                    message: "This link has expired.".into(),
-                });
-            }
-            let original_url: String = row.get("original_url");
-            Ok((
-                StatusCode::FOUND,
-                [
-                    (header::LOCATION, original_url.as_str()),
-                    (header::CACHE_CONTROL, "no-store"),
-                ],
-            )
-                .into_response())
-        }
-        Ok(None) => {
-            tracing::warn!("Short code not found: {}", short_code);
-            Err(HtmlError {
-                status: StatusCode::NOT_FOUND,
-                message: format!(
-                    "Short URL '{}' not found. It may have been mistyped or doesn't exist.",
-                    short_code
-                ),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            Err(HtmlError {
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct RedirectTarget {
+    original_url: String,
+    revoked_at: Option<String>,
+    expires_at: Option<i64>,
+    max_visits: Option<i64>,
+    visit_count: i64,
+}
+
+async fn redirect_target(db: &SqlitePool, short_code: &str) -> Result<RedirectTarget, HtmlError> {
+    sqlx::query_as(
+        "SELECT original_url, revoked_at, expires_at, max_visits, visit_count
+         FROM urls WHERE short_code = ?",
+    )
+    .bind(short_code)
+    .fetch_optional(db)
+    .await
+    .map_err(database_error)?
+    .ok_or_else(|| HtmlError {
+        status: StatusCode::NOT_FOUND,
+        message: format!(
+            "Short URL '{short_code}' not found. It may have been mistyped or doesn't exist."
+        ),
+    })
+}
+
+impl RedirectTarget {
+    fn unavailable(&self) -> Result<Option<Response>, HtmlError> {
+        if self.revoked_at.is_some() {
+            let html = RevokedTemplate {}.render().map_err(|_| HtmlError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: "Database error occurred. Please try again later.".to_string(),
-            })
+                message: "Unable to load page".into(),
+            })?;
+            return Ok(Some((StatusCode::GONE, Html(html)).into_response()));
         }
+        let message = if self
+            .expires_at
+            .is_some_and(|expiry| expiry <= Utc::now().timestamp())
+        {
+            "This link has expired."
+        } else if self.max_visits.is_some_and(|max| self.visit_count >= max) {
+            "This link has reached its maximum number of uses."
+        } else {
+            return Ok(None);
+        };
+        Err(HtmlError {
+            status: StatusCode::GONE,
+            message: message.into(),
+        })
+    }
+
+    fn redirect(&self, status: StatusCode) -> Result<Response, HtmlError> {
+        let location =
+            header::HeaderValue::from_str(&self.original_url).map_err(|_| HtmlError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "This link has an invalid destination.".into(),
+            })?;
+        Ok((status, [(header::LOCATION, location)], ()).into_response())
+    }
+
+    async fn consume_visit(&self, db: &SqlitePool, code: &str) -> Result<bool, HtmlError> {
+        // Count only redirects for the destination we are about to send.
+        let result = sqlx::query(
+            "UPDATE urls SET visit_count = visit_count + 1
+             WHERE short_code = ? AND original_url = ? AND revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > unixepoch())
+               AND max_visits IS NOT NULL AND visit_count < max_visits",
+        )
+        .bind(code)
+        .bind(&self.original_url)
+        .execute(db)
+        .await
+        .map_err(database_error)?;
+        Ok(result.rows_affected() == 1)
     }
 }
 
@@ -829,10 +897,11 @@ fn verify_altcha(secret: &str, payload: &str) -> Result<VerifiedChallenge, Strin
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct CreateUrlRequest {
     url: String,
     expires_at: Option<i64>,
+    max_visits: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -840,6 +909,8 @@ struct CreateUrlFormRequest {
     url: String,
     #[serde(default)]
     expires_at: String,
+    #[serde(default)]
+    max_visits: String,
     authenticity_token: String,
     altcha: String,
 }
@@ -860,6 +931,7 @@ struct ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     async fn state() -> AppState {
         AppState {
@@ -911,7 +983,7 @@ mod tests {
             row.get::<String, _>("original_url"),
             "https://example.com/old"
         );
-        let redirect = redirect_url(Path("abcd".into()), State(state)).await;
+        let redirect = redirect_url(Method::GET, Path("abcd".into()), State(state)).await;
         assert!(redirect.is_ok());
         let response = redirect.ok().unwrap().into_response();
         assert_eq!(

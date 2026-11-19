@@ -181,7 +181,7 @@ async fn challenge_is_not_consumed_when_link_insert_fails() {
         &state,
         CreateUrlRequest {
             url: "https://example.com".into(),
-            expires_at: None,
+            ..Default::default()
         },
         || "a".repeat(21),
         Some(verify_altcha(&state.altcha_secret, &payload).unwrap()),
@@ -428,6 +428,7 @@ async fn expired_links_return_410_without_location() {
         CreateUrlRequest {
             url: "https://example.com".into(),
             expires_at: Some(Utc::now().timestamp() - 1),
+            ..Default::default()
         },
         None,
     )
@@ -437,4 +438,58 @@ async fn expired_links_return_410_without_location() {
     let response = request(build_router(state), &format!("/{}", link.short_code)).await;
     assert_eq!(response.status(), StatusCode::GONE);
     assert!(!response.headers().contains_key(header::LOCATION));
+}
+
+#[tokio::test]
+async fn concurrent_gets_share_a_quota_and_head_does_not_spend_it() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com".into(),
+            max_visits: Some(2),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .ok()
+    .unwrap();
+    let app = build_router(state.clone());
+    let path = format!("/{}", link.short_code);
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::FOUND);
+    assert!(to_bytes(head.into_body(), 1).await.unwrap().is_empty());
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..12 {
+        let (app, path) = (app.clone(), path.clone());
+        tasks.spawn(async move { request(app, &path).await });
+    }
+    let mut redirects = 0;
+    while let Some(response) = tasks.join_next().await {
+        let response = response.unwrap();
+        if response.status() == StatusCode::FOUND {
+            redirects += 1;
+        } else {
+            assert_eq!(response.status(), StatusCode::GONE);
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+    }
+    assert_eq!(redirects, 2);
+    let count: i64 = sqlx::query_scalar("SELECT visit_count FROM urls WHERE short_code = ?")
+        .bind(link.short_code)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
 }
