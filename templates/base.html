@@ -1,42 +1,29 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>{% block title %}Maoyue's URL Shortener{% endblock %}</title>
+    <title>{% block title %}QuickGo{% endblock %}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     
     <meta name="description" content="{% block description %}A fast, lightweight URL shortener built with Rust. {% endblock %}">
     <meta name="keywords" content="url shortener, short links, link shortener, rust, fast">
     <meta name="author" content="Maoyue">
-    <meta name="robots" content="index, follow">
+    <meta name="robots" content="{% block robots %}index, follow{% endblock %}">
     
     <meta property="og:type" content="website">
-    <meta property="og:url" content="{% block canonical_url %}https://yue.lat/{% endblock %}">
-    <meta property="og:title" content="{% block og_title %}Maoyue's URL Shortener{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}QuickGo{% endblock %}">
     <meta property="og:description" content="{% block og_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
-    <meta property="og:site_name" content="Maoyue's URL Shortener">
+    <meta property="og:site_name" content="QuickGo">
     <meta property="og:locale" content="en_US">
     
-    <meta property="twitter:url" content="{% block twitter_url %}https://yue.lat/{% endblock %}">
-    <meta property="twitter:title" content="{% block twitter_title %}Maoyue's URL Shortener{% endblock %}">
+    <meta property="twitter:title" content="{% block twitter_title %}QuickGo{% endblock %}">
     <meta property="twitter:description" content="{% block twitter_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
     
     <meta name="theme-color" content="#007bff" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="dark">
     
-    <link rel="canonical" href="{% block canonical %}https://yue.lat/{% endblock %}">
     
-    <script type="application/ld+json">
-    {
-      "@context": "https://schema.org",
-      "@type": "WebApplication",
-      "name": "Maoyue's URL Shortener",
-      "description": "A fast, lightweight URL shortener built with Rust.",
-      "url": "https://yue.lat",
-      "applicationCategory": "WebApplication",
-      "operatingSystem": "Web",
-    }
-    </script>
+    {% block page_metadata %}{% endblock %}
     
     <style>
         body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 1rem; background: #1a1a1a; color-scheme: dark; color: #e0e0e0; }
@@ -74,7 +61,7 @@
         <div>Made with 🦀 Rust and ❤️</div>
         <div class="social-links">
             <a href="https://ko-fi.com/maoyue" class="donate" target="_blank" rel="noopener noreferrer">Donate</a>
-            <a href="https://github.com/MagicTeaMC/yue-lat" class="github" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="https://github.com/MagicTeaMC/quickgo" class="github" target="_blank" rel="noopener noreferrer">GitHub</a>
             <a href="https://maoyue.tw/#contact" class="contact" target="_blank" rel="noopener noreferrer">Contact</a>
             <a href="/api/v1" class="api_docs">API Docs</a>
         </div>

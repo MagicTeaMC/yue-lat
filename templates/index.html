@@ -1,17 +1,19 @@
 {% extends "base.html" %}
+{% block page_metadata %}
+<link rel="canonical" href="{{ base_url }}/">
+<meta property="og:url" content="{{ base_url }}/">
+<meta property="twitter:url" content="{{ base_url }}/">
+{% endblock %}
 {% block content %}
-<h1>Maoyue's URL Shortener</h1>
+<h1>QuickGo</h1>
 <script type="module" src="/static/altcha.min.js"></script>
 <form method="post" id="shorten-form">
     <input type="hidden" name="authenticity_token" value="{{ authenticity_token }}">
     <input type="url" name="url" placeholder="https://example.com/very/long/url" required>
     <div style="margin: 1rem 0;">
         <altcha-widget
-            challengeurl="data:application/json;base64,{{ altcha_challenge }}"
-            hidefooter="false"
-            hidelogo="false"
+            challenge="data:application/json;base64,{{ altcha_challenge }}"
             name="altcha"
-            strings='{"label":"Verify you are human","verified":"Verified","verifying":"Verifying...","error":"Verification failed","expired":"Verification expired"}'
         ></altcha-widget>
     </div>
     <button type="submit" id="submit-btn" disabled>Shorten</button>
