@@ -46,6 +46,10 @@ struct ApiDocsTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "about.html")]
+struct AboutTemplate {}
+
+#[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
     base_url: String,
@@ -254,6 +258,7 @@ fn build_router(app_state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
+        .route("/about", get(about))
         .route("/edit", get(manage::edit_form).post(manage::submit_edit))
         .route("/favicon.ico", get(favicon))
         .route(
@@ -414,6 +419,10 @@ async fn root(
             })
         }
     }
+}
+
+async fn about() -> Result<Html<String>, HtmlError> {
+    render_html(AboutTemplate {})
 }
 
 async fn api_docs(State(app_state): State<AppState>) -> Result<Html<String>, HtmlError> {

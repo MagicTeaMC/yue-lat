@@ -68,11 +68,11 @@
         <a href="/" {% block nav_home %}{% endblock %}>Home</a>
         <a href="/edit" {% block nav_edit %}{% endblock %}>Manage</a>
         <a href="/api/v1" {% block nav_docs %}{% endblock %}>API Docs</a>
+        <a href="/about" {% block nav_about %}{% endblock %}>About</a>
     </nav>
     <main>{% block content %}{% endblock %}</main>
     
     <div class="footer">
-        {% block footer_notice %}{% endblock %}
         <div>Made with 🦀 Rust and ❤️</div>
         <div class="social-links">
             <a href="https://ko-fi.com/maoyue" class="donate" target="_blank" rel="noopener noreferrer">Donate</a>

@@ -247,10 +247,10 @@ async fn reserved_paths_cannot_be_allocated_or_resolved_as_short_links() {
     .await
     .unwrap();
     let app = build_router(state);
-    assert_eq!(
-        request(app.clone(), "/about").await.status(),
-        StatusCode::NOT_FOUND
-    );
+    let about = request(app.clone(), "/about").await;
+    assert_eq!(about.status(), StatusCode::OK);
+    assert!(!about.headers().contains_key(header::LOCATION));
+    assert!(html_body(about).await.contains("<h1>About</h1>"));
     assert_eq!(
         request(app.clone(), "/api/v1").await.status(),
         StatusCode::OK
@@ -1317,7 +1317,7 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let state = state().await;
     let app = build_router(state.clone());
     let (cookie, csrf, html) = form_page(request(app.clone(), "/").await).await;
-    assert!(html.contains("Report abuse:"));
+    assert!(!html.contains("Report abuse"));
     assert!(html.contains("type=\"datetime-local\" name=\"expires_at\""));
     let created = form_post(
         &app,
@@ -1357,11 +1357,33 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let url = format!("/{code}");
     let protected = html_body(request(app.clone(), &url).await).await;
     assert!(!protected.contains(token));
-    assert!(protected.contains("Report abuse:"));
+    assert!(!protected.contains("Report abuse"));
     assert!(protected.contains("<title>Password Required - QuickGo</title>"));
     db::revoke_link(&state.db, &code, "abuse").await.unwrap();
     let revoked = html_body(request(app, &url).await).await;
     assert!(!revoked.contains(token));
-    assert!(revoked.contains("Report abuse:"));
+    assert!(!revoked.contains("Report abuse"));
     assert!(revoked.contains("<title>Link Revoked - QuickGo</title>"));
+}
+
+#[tokio::test]
+async fn public_pages_use_consistent_titles_and_about_explains_abuse_reporting() {
+    let app = build_router(state().await);
+    for (path, title) in [
+        ("/", "QuickGo"),
+        ("/edit", "Manage a Link - QuickGo"),
+        ("/api/v1", "API Documentation - QuickGo"),
+        ("/about", "About - QuickGo"),
+        ("/missing", "Error - QuickGo"),
+    ] {
+        let html = html_body(request(app.clone(), path).await).await;
+        assert!(html.contains(&format!("<title>{title}</title>")));
+        if path == "/about" {
+            assert!(html.contains("<h2>Report abuse</h2>"));
+            assert!(html.contains("https://maoyue.tw/#contact"));
+            assert!(html.contains("include the short link"));
+        } else {
+            assert!(!html.contains("Report abuse"));
+        }
+    }
 }
