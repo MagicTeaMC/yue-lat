@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "quickgo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "altcha-lib-rs",
  "anyhow",
