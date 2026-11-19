@@ -52,8 +52,8 @@ X-API-Key: your-api-key-here</pre>
     <div class="result">
         <pre style="margin: 0; white-space: pre-wrap;">{
   "original_url": "https://example.com/very/long/url",
-  "short_code": "aBc3X9",
-  "short_url": "{{ base_url }}/aBc3X9"
+  "short_code": "AC3X79",
+  "short_url": "{{ base_url }}/AC3X79"
 }</pre>
     </div>
 
@@ -66,11 +66,31 @@ X-API-Key: your-api-key-here</pre>
             </tr>
             <tr style="border-bottom: 1px solid #404040;">
                 <td style="padding: 0.5rem;"><code>400</code></td>
-                <td style="padding: 0.5rem;">Invalid URL format or URL too long</td>
+                <td style="padding: 0.5rem;">Malformed JSON, or an invalid or too-long URL</td>
             </tr>
             <tr style="border-bottom: 1px solid #404040;">
                 <td style="padding: 0.5rem;"><code>401</code></td>
                 <td style="padding: 0.5rem;">Missing or invalid API key</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>403</code></td>
+                <td style="padding: 0.5rem;">Access denied by the reverse proxy</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>413</code></td>
+                <td style="padding: 0.5rem;">Request body too large</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>415</code></td>
+                <td style="padding: 0.5rem;">Content-Type must be application/json</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>422</code></td>
+                <td style="padding: 0.5rem;">JSON body does not match the expected fields</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #404040;">
+                <td style="padding: 0.5rem;"><code>429</code></td>
+                <td style="padding: 0.5rem;">Too many requests. Wait before retrying and use backoff.</td>
             </tr>
             <tr style="border-bottom: 1px solid #404040;">
                 <td style="padding: 0.5rem;"><code>500</code></td>
@@ -81,6 +101,9 @@ X-API-Key: your-api-key-here</pre>
     </div>
 
     <h4>Error Response Format</h4>
+    <p>Application errors may use the JSON format below. Proxy errors, including <code>429</code>,
+       may return HTML. Check the status and Content-Type before parsing the body.
+       Honor <code>Retry-After</code> if present.</p>
     <div class="result">
         <pre style="margin: 0; white-space: pre-wrap;">{
   "error": "Error message description"
