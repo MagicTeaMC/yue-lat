@@ -22,6 +22,7 @@ use http::Method;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::net::{IpAddr, SocketAddr};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -29,6 +30,8 @@ use url::Url;
 
 const MAX_URL_LENGTH: usize = 2048;
 const MAX_SHORT_CODE_LENGTH: usize = 20;
+// Keep only one glyph from each common lookalike pair.
+const SHORT_CODE_ALPHABET: &[u8] = b"23456789ACDEFHJKMNPRTVWXY";
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 #[derive(Template)]
@@ -128,7 +131,11 @@ async fn validate_api_key(
     Ok(next.run(req).await)
 }
 
-fn service_config() -> Result<(u16, String, String)> {
+fn service_config() -> Result<(SocketAddr, String, String)> {
+    let ip: IpAddr = dotenvy::var("LISTEN_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1".into())
+        .parse()
+        .map_err(|_| anyhow::anyhow!("LISTEN_ADDR must be an IPv4 or IPv6 address"))?;
     let port = dotenvy::var("PORT")
         .unwrap_or_else(|_| "3000".into())
         .parse::<u16>()?;
@@ -145,7 +152,7 @@ fn service_config() -> Result<(u16, String, String)> {
             .is_empty(),
         "API_KEYS is no longer supported. Remove it and create keys with quickgo api-key create"
     );
-    Ok((port, base_url, secret))
+    Ok((SocketAddr::new(ip, port), base_url, secret))
 }
 
 #[tokio::main]
@@ -161,7 +168,7 @@ async fn main() -> Result<()> {
     if !matches!(cli.command, cli::Command::Serve) {
         return cli::run_local(&cli).await;
     }
-    let (port, base_url, altcha_secret) = service_config()?;
+    let (listen_addr, base_url, altcha_secret) = service_config()?;
     let db = setup_database(&cli.database_path).await?;
 
     let app_state = AppState {
@@ -172,9 +179,9 @@ async fn main() -> Result<()> {
 
     let app = build_router(app_state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
 
-    tracing::info!("QuickGo listening on http://0.0.0.0:{}", port);
+    tracing::info!("QuickGo listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -662,14 +669,13 @@ async fn redirect_url(
 }
 
 fn generate_short_code() -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const CODE_LENGTH: usize = 6;
 
     let mut rng = rand::rng();
     (0..CODE_LENGTH)
         .map(|_| {
-            let idx = rng.random_range(0..CHARSET.len());
-            CHARSET[idx] as char
+            let idx = rng.random_range(0..SHORT_CODE_ALPHABET.len());
+            SHORT_CODE_ALPHABET[idx] as char
         })
         .collect()
 }
@@ -849,7 +855,7 @@ mod tests {
             response
                 .short_code
                 .bytes()
-                .all(|c| c.is_ascii_alphanumeric())
+                .all(|c| SHORT_CODE_ALPHABET.contains(&c))
         );
         assert_eq!(
             response.short_url,

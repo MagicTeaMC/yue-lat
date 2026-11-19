@@ -25,6 +25,7 @@ impl Database {
             .env_remove("API_KEYS")
             .env_remove("BASE_URL")
             .env_remove("PORT")
+            .env_remove("LISTEN_ADDR")
             .current_dir(self.0.parent().unwrap())
             .output()
             .unwrap()
