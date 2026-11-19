@@ -179,7 +179,10 @@ async fn challenge_is_not_consumed_when_link_insert_fails() {
     );
     let result = store_url(
         &state,
-        "https://example.com".into(),
+        CreateUrlRequest {
+            url: "https://example.com".into(),
+            expires_at: None,
+        },
         || "a".repeat(21),
         Some(verify_altcha(&state.altcha_secret, &payload).unwrap()),
     )
@@ -415,4 +418,23 @@ async fn form_checks_csrf_and_captcha_and_sets_no_store() {
         submit(app, &cookie, token, &payload).await.status(),
         StatusCode::BAD_REQUEST
     );
+}
+
+#[tokio::test]
+async fn expired_links_return_410_without_location() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com".into(),
+            expires_at: Some(Utc::now().timestamp() - 1),
+        },
+        None,
+    )
+    .await
+    .ok()
+    .unwrap();
+    let response = request(build_router(state), &format!("/{}", link.short_code)).await;
+    assert_eq!(response.status(), StatusCode::GONE);
+    assert!(!response.headers().contains_key(header::LOCATION));
 }

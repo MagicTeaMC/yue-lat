@@ -77,6 +77,15 @@ struct HtmlError {
     message: String,
 }
 
+impl From<(StatusCode, ErrorResponse)> for HtmlError {
+    fn from((status, response): (StatusCode, ErrorResponse)) -> Self {
+        Self {
+            status,
+            message: response.error,
+        }
+    }
+}
+
 impl IntoResponse for HtmlError {
     fn into_response(self) -> Response {
         let template = ErrorTemplate {
@@ -396,7 +405,7 @@ async fn create_url(
     State(app_state): State<AppState>,
     Json(payload): Json<CreateUrlRequest>,
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let result = shorten_url(app_state, payload.url).await;
+    let result = create_link(&app_state, payload, None).await;
     match result {
         Ok(response) => {
             tracing::info!("Created short URL: {}", response.short_code);
@@ -427,7 +436,15 @@ async fn create_url_form(
             status: StatusCode::BAD_REQUEST,
             message,
         })?;
-    let result = shorten_url_with_challenge(app_state, payload.url, Some(challenge)).await;
+    let result = create_link(
+        &app_state,
+        CreateUrlRequest {
+            url: payload.url,
+            expires_at: parse_form_expiration(&payload.expires_at).map_err(HtmlError::from)?,
+        },
+        Some(challenge),
+    )
+    .await;
     match result {
         Ok(response) => {
             tracing::info!("Created short URL via form: {}", response.short_code);
@@ -459,6 +476,7 @@ async fn create_url_form(
     }
 }
 
+#[cfg(test)]
 async fn shorten_url(
     app_state: AppState,
     url: String,
@@ -466,12 +484,59 @@ async fn shorten_url(
     shorten_url_with_challenge(app_state, url, None).await
 }
 
+#[cfg(test)]
 async fn shorten_url_with_challenge(
     app_state: AppState,
     url: String,
     challenge: Option<VerifiedChallenge>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
-    if let Err(error) = validate_url_length(&url) {
+    create_link(
+        &app_state,
+        CreateUrlRequest {
+            url,
+            expires_at: None,
+        },
+        challenge,
+    )
+    .await
+}
+
+fn parse_form_expiration(input: &str) -> Result<Option<i64>, (StatusCode, ErrorResponse)> {
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    chrono::DateTime::parse_from_rfc3339(input.trim())
+        .map(|date| Some(date.timestamp()))
+        .map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Enter an expiration with a time zone, e.g. 2030-06-15T12:00:00Z",
+            )
+        })
+}
+
+fn validate_expiration(expires_at: Option<i64>) -> Result<(), (StatusCode, ErrorResponse)> {
+    if expires_at.is_some_and(|value| chrono::DateTime::from_timestamp(value, 0).is_none()) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Expiration is outside the supported range",
+        ));
+    }
+    Ok(())
+}
+
+async fn create_link(
+    app_state: &AppState,
+    mut payload: CreateUrlRequest,
+    challenge: Option<VerifiedChallenge>,
+) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    payload.url = normalize_destination(&payload.url, &app_state.base_url)?;
+    validate_expiration(payload.expires_at)?;
+    store_url(app_state, payload, generate_short_code, challenge).await
+}
+
+fn normalize_destination(url: &str, base_url: &str) -> Result<String, (StatusCode, ErrorResponse)> {
+    if let Err(error) = validate_url_length(url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
     if url.trim().is_empty() {
@@ -493,8 +558,10 @@ async fn shorten_url_with_challenge(
             "URL credentials are not allowed",
         ));
     }
-    let base = Url::parse(&app_state.base_url).expect("validated base URL");
-    if parsed.host_str() == base.host_str() {
+    let base = Url::parse(base_url).expect("validated base URL");
+    if parsed.host_str().map(|host| host.trim_end_matches('.'))
+        == base.host_str().map(|host| host.trim_end_matches('.'))
+    {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "Links to this shortener are not allowed",
@@ -503,7 +570,7 @@ async fn shorten_url_with_challenge(
     let normalized = parsed.to_string();
     validate_url_length(&normalized)
         .map_err(|error| (StatusCode::BAD_REQUEST, ErrorResponse { error }))?;
-    store_url(&app_state, normalized, generate_short_code, challenge).await
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -512,7 +579,16 @@ async fn store_url_with_generator(
     url: String,
     mut generate: impl FnMut() -> String,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
-    store_url(app_state, url, &mut generate, None).await
+    store_url(
+        app_state,
+        CreateUrlRequest {
+            url,
+            expires_at: None,
+        },
+        &mut generate,
+        None,
+    )
+    .await
 }
 
 fn api_error(status: StatusCode, message: &str) -> (StatusCode, ErrorResponse) {
@@ -534,7 +610,7 @@ fn database_error(error: sqlx::Error) -> (StatusCode, ErrorResponse) {
 
 async fn store_url(
     app_state: &AppState,
-    url: String,
+    payload: CreateUrlRequest,
     mut generate: impl FnMut() -> String,
     challenge: Option<VerifiedChallenge>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
@@ -580,18 +656,19 @@ async fn store_url(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
         })?;
         match sqlx::query(
-            "INSERT INTO urls (short_code, original_url, edit_token_hash) VALUES (?, ?, ?)",
+            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at) VALUES (?, ?, ?, ?)",
         )
         .bind(&short_code)
-        .bind(&url)
+        .bind(&payload.url)
         .bind(db::hash_key(&edit_token))
+        .bind(payload.expires_at)
         .execute(&mut *tx)
         .await
         {
             Ok(_) => {
                 tx.commit().await.map_err(database_error)?;
                 return Ok(UrlResponse {
-                    original_url: url,
+                    original_url: payload.url,
                     short_url: format!("{}/{}", app_state.base_url, short_code),
                     short_code,
                     edit_token,
@@ -631,10 +708,11 @@ async fn redirect_url(
             message: "Invalid short code format.".to_string(),
         });
     }
-    let result = sqlx::query("SELECT original_url, revoked_at FROM urls WHERE short_code = ?")
-        .bind(&short_code)
-        .fetch_optional(&app_state.db)
-        .await;
+    let result =
+        sqlx::query("SELECT original_url, revoked_at, expires_at FROM urls WHERE short_code = ?")
+            .bind(&short_code)
+            .fetch_optional(&app_state.db)
+            .await;
     match result {
         Ok(Some(row)) => {
             if row.get::<Option<String>, _>("revoked_at").is_some() {
@@ -648,6 +726,15 @@ async fn redirect_url(
                     Html(html),
                 )
                     .into_response());
+            }
+            if row
+                .get::<Option<i64>, _>("expires_at")
+                .is_some_and(|expires_at| expires_at <= Utc::now().timestamp())
+            {
+                return Err(HtmlError {
+                    status: StatusCode::GONE,
+                    message: "This link has expired.".into(),
+                });
             }
             let original_url: String = row.get("original_url");
             Ok((
@@ -745,11 +832,14 @@ fn verify_altcha(secret: &str, payload: &str) -> Result<VerifiedChallenge, Strin
 #[derive(Deserialize)]
 struct CreateUrlRequest {
     url: String,
+    expires_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
 struct CreateUrlFormRequest {
     url: String,
+    #[serde(default)]
+    expires_at: String,
     authenticity_token: String,
     altcha: String,
 }
