@@ -52,6 +52,7 @@ struct IndexTemplate {
 #[template(path = "success.html")]
 struct SuccessTemplate {
     short_url: String,
+    edit_token: String,
 }
 
 #[derive(Template)]
@@ -249,6 +250,7 @@ const RESERVED_PATHS: &[&str] = &[
     "ready",
     "readyz",
     "admin",
+    "edit",
     "revoke",
     "login",
     "logout",
@@ -431,6 +433,7 @@ async fn create_url_form(
             tracing::info!("Created short URL via form: {}", response.short_code);
             let success_template = SuccessTemplate {
                 short_url: response.short_url,
+                edit_token: response.edit_token,
             };
             match success_template.render() {
                 Ok(html) => Ok(Html(html)),
@@ -572,11 +575,18 @@ async fn store_url(
         if is_reserved(&short_code) {
             continue;
         }
-        match sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
-            .bind(&short_code)
-            .bind(&url)
-            .execute(&mut *tx)
-            .await
+        let edit_token = db::generate_secret("qke_").map_err(|error| {
+            tracing::error!("Edit token generation failed: {error}");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
+        })?;
+        match sqlx::query(
+            "INSERT INTO urls (short_code, original_url, edit_token_hash) VALUES (?, ?, ?)",
+        )
+        .bind(&short_code)
+        .bind(&url)
+        .bind(db::hash_key(&edit_token))
+        .execute(&mut *tx)
+        .await
         {
             Ok(_) => {
                 tx.commit().await.map_err(database_error)?;
@@ -584,6 +594,7 @@ async fn store_url(
                     original_url: url,
                     short_url: format!("{}/{}", app_state.base_url, short_code),
                     short_code,
+                    edit_token,
                 });
             }
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
@@ -748,6 +759,7 @@ struct UrlResponse {
     original_url: String,
     short_code: String,
     short_url: String,
+    edit_token: String,
 }
 
 #[derive(Serialize)]

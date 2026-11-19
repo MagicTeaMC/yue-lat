@@ -42,6 +42,10 @@
 
 </div>
 
+<p><strong>Edit Token:</strong> <code id="edit-token">{{ edit_token }}</code>
+    <button type="button" onclick="copyToClipboard(document.getElementById('edit-token').textContent, this)">Copy token</button>
+</p>
+<p>Save this token privately. It is shown only once and cannot be recovered.</p>
 <a href="/">← Create Another</a>
 
 <script src="/static/qrcode.min.js"></script>

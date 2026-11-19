@@ -37,20 +37,24 @@ pub fn hash_key(key: &str) -> String {
     base16ct::lower::encode_string(&Sha256::digest(key.as_bytes()))
 }
 
+pub fn generate_secret(prefix: &str) -> Result<String> {
+    use base64::Engine;
+    let mut bytes = [0_u8; 32];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut bytes)
+        .context("Cannot generate random credential")?;
+    Ok(format!(
+        "{prefix}{}",
+        base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(bytes)
+    ))
+}
+
 pub async fn create_key(db: &SqlitePool, name: &str) -> Result<(i64, String)> {
     ensure!(
         !name.trim().is_empty() && name.len() <= 100,
         "Name must be 1–100 bytes"
     );
-    let mut bytes = [0_u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut bytes)
-        .context("Cannot generate API key")?;
-    use base64::Engine;
-    let key = format!(
-        "qkg_{}",
-        base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(bytes)
-    );
+    let key = generate_secret("qkg_")?;
     let result = sqlx::query("INSERT INTO api_keys (name, key_hash) VALUES (?, ?)")
         .bind(name.trim())
         .bind(hash_key(&key))
