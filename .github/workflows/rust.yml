@@ -16,5 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install stable Rust
+      run: rustup update stable --no-self-update && rustup default stable
+    - name: Format
+      run: cargo fmt --check
+    - name: Test
+      run: cargo test --locked
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --release --locked

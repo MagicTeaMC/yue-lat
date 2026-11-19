@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% block page_metadata %}
+<link rel="canonical" href="{{ base_url }}/">
+<meta property="og:url" content="{{ base_url }}/">
+<meta property="twitter:url" content="{{ base_url }}/">
+{% endblock %}
 {% block content %}
-<h1>Maoyue's URL Shortener</h1>
+<h1>qkgo</h1>
 <script type="module" src="/static/altcha.min.js"></script>
 <form method="post" id="shorten-form">
     <input type="hidden" name="authenticity_token" value="{{ authenticity_token }}">

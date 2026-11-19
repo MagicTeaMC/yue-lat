@@ -30,11 +30,14 @@ const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 #[derive(Template)]
 #[template(path = "api_docs.html")]
-struct ApiDocsTemplate {}
+struct ApiDocsTemplate {
+    base_url: String,
+}
 
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
+    base_url: String,
     authenticity_token: String,
     altcha_challenge: String,
 }
@@ -122,15 +125,20 @@ async fn validate_api_key(
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    dotenvy::dotenv_override()?;
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(dotenvy::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     let port: u16 = dotenvy::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
         .expect("PORT must be a valid number");
 
-    let base_url = dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://yue.lat".to_string());
-    let base_url = base_url.trim_end_matches('/').to_string();
+    let base_url = normalize_base_url(
+        &dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://qkgo.de".to_string()),
+    )?;
 
     let api_keys_str = dotenvy::var("API_KEYS").expect("API_KEYS environment variable must be set");
 
@@ -145,10 +153,15 @@ async fn main() -> Result<()> {
     }
 
     let altcha_secret = dotenvy::var("ALTCHA_SECRET").expect("ALTCHA_SECRET must be set");
+    anyhow::ensure!(
+        !altcha_secret.trim().is_empty(),
+        "ALTCHA_SECRET must not be empty"
+    );
     tracing::info!("Loaded {} API key(s)", api_keys.len());
     tracing::info!("Using base URL: {}", base_url);
 
-    let db = setup_database().await.expect("Failed to setup database");
+    let database_path = dotenvy::var("DATABASE_PATH").unwrap_or_else(|_| "urls.db".to_string());
+    let db = setup_database(&database_path).await?;
 
     let app_state = AppState {
         db,
@@ -196,10 +209,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
+async fn setup_database(path: &str) -> Result<SqlitePool, sqlx::Error> {
+    let options = if path == ":memory:" {
+        "sqlite::memory:".parse::<sqlx::sqlite::SqliteConnectOptions>()?
+    } else {
+        sqlx::sqlite::SqliteConnectOptions::new().filename(path)
+    };
     let pool = SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::new()
-            .filename("urls.db")
+        options
             .create_if_missing(true)
             .pragma("journal_mode", "WAL")
             .pragma("synchronous", "NORMAL")
@@ -221,6 +238,21 @@ async fn setup_database() -> Result<SqlitePool, sqlx::Error> {
 
     tracing::info!("Database pool initialized with {} connections", pool.size());
     Ok(pool)
+}
+
+fn normalize_base_url(value: &str) -> Result<String> {
+    let parsed = Url::parse(value.trim())?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host_str().is_some()
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.path() == "/"
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "BASE_URL must be an HTTP(S) origin without credentials, path, query, or fragment"
+    );
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 fn validate_url_length(url: &str) -> Result<(), String> {
@@ -298,6 +330,7 @@ async fn root(
     let challenge_base64 = BASE64_STANDARD.encode(challenge_json.as_bytes());
 
     let template = IndexTemplate {
+        base_url: app_state.base_url.clone(),
         authenticity_token: token.authenticity_token().unwrap(),
         altcha_challenge: challenge_base64,
     };
@@ -314,8 +347,10 @@ async fn root(
     }
 }
 
-async fn api_docs() -> Result<Html<String>, HtmlError> {
-    let template = ApiDocsTemplate {};
+async fn api_docs(State(app_state): State<AppState>) -> Result<Html<String>, HtmlError> {
+    let template = ApiDocsTemplate {
+        base_url: app_state.base_url,
+    };
     match template.render() {
         Ok(html) => Ok(Html(html)),
         Err(e) => {
@@ -335,11 +370,7 @@ async fn create_url(
     let result = shorten_url(app_state, payload.url).await;
     match result {
         Ok(response) => {
-            tracing::info!(
-                "Created short URL: {} -> {}",
-                response.short_code,
-                response.original_url
-            );
+            tracing::info!("Created short URL: {}", response.short_code);
             Ok((StatusCode::CREATED, Json(response)))
         }
         Err((status, error_response)) => {
@@ -374,11 +405,7 @@ async fn create_url_form(
     let result = shorten_url(app_state, payload.url).await;
     match result {
         Ok(response) => {
-            tracing::info!(
-                "Created short URL via form: {} -> {}",
-                response.short_code,
-                response.original_url
-            );
+            tracing::info!("Created short URL via form: {}", response.short_code);
             let success_template = SuccessTemplate {
                 short_url: response.short_url,
             };
@@ -425,66 +452,32 @@ async fn shorten_url(
     if let Err(error) = validate_url_format(&url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
-    let mut attempts = 0;
-    let max_attempts = 10;
-    loop {
-        let short_code = generate_short_code();
-        if let Err(error) = validate_short_code_length(&short_code) {
-            tracing::error!("Generated short code validation failed: {}", error);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorResponse {
-                    error: "Internal error generating short code".to_string(),
-                },
-            ));
-        }
-        let exists = sqlx::query("SELECT 1 FROM urls WHERE short_code = ?")
+    store_url_with_generator(&app_state, url, generate_short_code).await
+}
+
+async fn store_url_with_generator(
+    app_state: &AppState,
+    url: String,
+    mut generate: impl FnMut() -> String,
+) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    for _ in 0..10 {
+        let short_code = generate();
+        match sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
             .bind(&short_code)
-            .fetch_optional(&app_state.db)
-            .await;
-        match exists {
-            Ok(None) => {
-                let result =
-                    sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
-                        .bind(&short_code)
-                        .bind(&url)
-                        .execute(&app_state.db)
-                        .await;
-                match result {
-                    Ok(_) => {
-                        let response = UrlResponse {
-                            original_url: url,
-                            short_code: short_code.clone(),
-                            short_url: format!("{}/{}", app_state.base_url, short_code),
-                        };
-                        return Ok(response);
-                    }
-                    Err(e) => {
-                        tracing::error!("Database error: {}", e);
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            ErrorResponse {
-                                error: "Database error occurred. Please try again.".to_string(),
-                            },
-                        ));
-                    }
-                }
+            .bind(&url)
+            .execute(&app_state.db)
+            .await
+        {
+            Ok(_) => {
+                return Ok(UrlResponse {
+                    original_url: url,
+                    short_url: format!("{}/{}", app_state.base_url, short_code),
+                    short_code,
+                });
             }
-            Ok(Some(_)) => {
-                attempts += 1;
-                if attempts >= max_attempts {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        ErrorResponse {
-                            error: "Unable to generate unique short code. Please try again."
-                                .to_string(),
-                        },
-                    ));
-                }
-                continue;
-            }
-            Err(e) => {
-                tracing::error!("Database query error: {}", e);
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
+            Err(error) => {
+                tracing::error!("Database insert failed: {}", error);
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     ErrorResponse {
@@ -494,6 +487,12 @@ async fn shorten_url(
             }
         }
     }
+    Err((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorResponse {
+            error: "Unable to generate unique short code. Please try again.".to_string(),
+        },
+    ))
 }
 
 async fn redirect_url(
@@ -521,7 +520,7 @@ async fn redirect_url(
     match result {
         Ok(Some(row)) => {
             let original_url: String = row.get("original_url");
-            tracing::debug!("Redirecting {} -> {}", short_code, original_url);
+            tracing::debug!("Redirecting {}", short_code);
             Ok(Redirect::permanent(&original_url))
         }
         Ok(None) => {
@@ -546,7 +545,7 @@ async fn redirect_url(
 
 fn generate_short_code() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const CODE_LENGTH: usize = 4;
+    const CODE_LENGTH: usize = 6;
 
     let mut rng = rand::rng();
     (0..CODE_LENGTH)
@@ -597,4 +596,140 @@ struct UrlResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn state() -> AppState {
+        AppState {
+            db: setup_database(":memory:").await.unwrap(),
+            base_url: "https://qkgo.de".into(),
+            api_keys: vec!["test-key".into()],
+            altcha_secret: "test-secret".into(),
+        }
+    }
+
+    #[test]
+    fn base_url_accepts_origins_and_rejects_unsafe_components() {
+        assert_eq!(
+            normalize_base_url(" https://qkgo.de/ ").unwrap(),
+            "https://qkgo.de"
+        );
+        assert_eq!(
+            normalize_base_url("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+        for invalid in [
+            "javascript:alert(1)",
+            "https://user:pass@example.com",
+            "https://example.com/path",
+            "https://example.com/?a=b",
+            "https://example.com/#fragment",
+        ] {
+            assert!(normalize_base_url(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn collision_retries_without_overwriting_existing_link() {
+        let state = state().await;
+        sqlx::query("INSERT INTO urls (short_code, original_url) VALUES ('abcd', 'https://example.com/old')")
+            .execute(&state.db).await.unwrap();
+        let mut codes = ["abcd", "Ab12Cd"].into_iter();
+        let response = store_url_with_generator(&state, "https://example.com/new".into(), || {
+            codes.next().unwrap().into()
+        })
+        .await;
+        assert!(response.is_ok());
+        let response = response.ok().unwrap();
+        assert_eq!(response.short_url, "https://qkgo.de/Ab12Cd");
+        let row = sqlx::query("SELECT original_url FROM urls WHERE short_code = 'abcd'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<String, _>("original_url"),
+            "https://example.com/old"
+        );
+        let redirect = redirect_url(Path("abcd".into()), State(state)).await;
+        assert!(redirect.is_ok());
+        let response = redirect.ok().unwrap().into_response();
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "https://example.com/old"
+        );
+    }
+
+    #[tokio::test]
+    async fn collisions_stop_after_ten_attempts_and_database_errors_do_not_retry() {
+        let state = state().await;
+        let mut attempts = 0;
+        let first =
+            store_url_with_generator(&state, "https://example.com".into(), || "abcdef".into())
+                .await;
+        assert!(first.is_ok());
+        let result = store_url_with_generator(&state, "https://example.com/new".into(), || {
+            attempts += 1;
+            "abcdef".into()
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 10);
+        state.db.close().await;
+        attempts = 0;
+        let result = store_url_with_generator(&state, "https://example.com".into(), || {
+            attempts += 1;
+            "ghijkl".into()
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn new_links_use_six_characters_and_reject_non_web_urls() {
+        let state = state().await;
+        let result = shorten_url(state.clone(), "https://example.com/path?q=1".into()).await;
+        assert!(result.is_ok());
+        let response = result.ok().unwrap();
+        assert_eq!(response.short_code.len(), 6);
+        assert!(
+            response
+                .short_code
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric())
+        );
+        assert_eq!(
+            response.short_url,
+            format!("https://qkgo.de/{}", response.short_code)
+        );
+        assert!(
+            shorten_url(state, "javascript:alert(1)".into())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn documentation_and_homepage_follow_configured_origin() {
+        let base_url = "https://links.example.com:8443";
+        let docs = ApiDocsTemplate {
+            base_url: base_url.into(),
+        }
+        .render()
+        .unwrap();
+        assert!(docs.contains("https://links.example.com:8443/api/v1/shorten"));
+        assert!(!docs.contains("yue.lat"));
+        let index = IndexTemplate {
+            base_url: base_url.into(),
+            authenticity_token: "test-token".into(),
+            altcha_challenge: "test-challenge".into(),
+        }
+        .render()
+        .unwrap();
+        assert!(index.contains("https://links.example.com:8443/"));
+        assert!(index.contains("<h1>qkgo</h1>"));
+    }
 }
