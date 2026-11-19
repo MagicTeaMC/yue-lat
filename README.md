@@ -1,6 +1,6 @@
 # QuickGo 🔗
 
-A fast, lightweight URL shortener built with Rust. Previously yue.lat.
+A fast, lightweight URL shortener built with Rust.
 
 ## 🚀 Quick Start
 ### API
