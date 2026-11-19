@@ -947,6 +947,18 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     assert_eq!(expected_owner, id);
 
     let path = format!("/api/v1/links/{code}");
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            edit_token,
+            Some(json!({"max_visits": 1}))
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
     let public_path = format!("/{code}");
     let owned = json_body(api_link(&app, Method::GET, &path, &key, None).await).await;
     assert_eq!(owned["has_password"], true);
@@ -1364,6 +1376,41 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     assert!(!revoked.contains(token));
     assert!(!revoked.contains("Report abuse"));
     assert!(revoked.contains("<title>Link Revoked - QuickGo</title>"));
+}
+
+#[tokio::test]
+async fn url_punctuation_is_stored_as_data_and_edits_stay_on_the_selected_link() {
+    let state = state().await;
+    let (_, key) = db::create_key(&state.db, "O'Brien; QA").await.unwrap();
+    let app = build_router(state);
+    let other = json_body(api(app.clone(), Some(&key), "https://example.com/other").await).await;
+    let created =
+        json_body(api(app.clone(), Some(&key), "https://example.com/O'Brien;guide").await).await;
+    assert_eq!(created["original_url"], "https://example.com/O'Brien;guide");
+
+    let code = created["short_code"].as_str().unwrap();
+    let other_code = other["short_code"].as_str().unwrap();
+    let destination = "https://example.com/l'été;2026";
+    let response = api_link(
+        &app,
+        Method::PATCH,
+        &format!("/api/v1/links/{code}"),
+        &key,
+        Some(serde_json::json!({"url": destination})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = json_body(response).await;
+    assert_eq!(
+        result["original_url"],
+        Url::parse(destination).unwrap().as_str()
+    );
+    let redirect = request(app, &format!("/{other_code}")).await;
+    assert_eq!(redirect.status(), StatusCode::FOUND);
+    assert_eq!(
+        redirect.headers()[header::LOCATION],
+        "https://example.com/other"
+    );
 }
 
 #[tokio::test]
