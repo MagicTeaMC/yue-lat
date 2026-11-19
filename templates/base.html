@@ -1,22 +1,22 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>{% block title %}qkgo{% endblock %}</title>
+    <title>{% block title %}QuickGo{% endblock %}</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     
     <meta name="description" content="{% block description %}A fast, lightweight URL shortener built with Rust. {% endblock %}">
     <meta name="keywords" content="url shortener, short links, link shortener, rust, fast">
     <meta name="author" content="Maoyue">
-    <meta name="robots" content="index, follow">
+    <meta name="robots" content="{% block robots %}index, follow{% endblock %}">
     
     <meta property="og:type" content="website">
-    <meta property="og:title" content="{% block og_title %}qkgo{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}QuickGo{% endblock %}">
     <meta property="og:description" content="{% block og_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
-    <meta property="og:site_name" content="qkgo">
+    <meta property="og:site_name" content="QuickGo">
     <meta property="og:locale" content="en_US">
     
-    <meta property="twitter:title" content="{% block twitter_title %}qkgo{% endblock %}">
+    <meta property="twitter:title" content="{% block twitter_title %}QuickGo{% endblock %}">
     <meta property="twitter:description" content="{% block twitter_description %}A fast, lightweight URL shortener built with Rust.{% endblock %}">
     
     <meta name="theme-color" content="#007bff" media="(prefers-color-scheme: dark)">

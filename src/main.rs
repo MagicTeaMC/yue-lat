@@ -1,3 +1,6 @@
+mod cli;
+mod db;
+
 use altcha_lib_rs::ChallengeOptions;
 use anyhow::Result;
 use askama::Template;
@@ -7,13 +10,14 @@ use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use axum_csrf::{CsrfConfig, CsrfLayer, CsrfToken};
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::Utc;
+use clap::Parser;
 use http::Method;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -21,7 +25,6 @@ use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
-use tracing_subscriber;
 use url::Url;
 
 const MAX_URL_LENGTH: usize = 2048;
@@ -54,11 +57,14 @@ struct ErrorTemplate {
     error_message: String,
 }
 
+#[derive(Template)]
+#[template(path = "revoked.html")]
+struct RevokedTemplate {}
+
 #[derive(Clone)]
 struct AppState {
     db: SqlitePool,
     base_url: String,
-    api_keys: Vec<String>,
     altcha_secret: String,
 }
 
@@ -99,27 +105,47 @@ async fn validate_api_key(
                 .and_then(|v| v.strip_prefix("Bearer "))
         });
 
-    match api_key {
-        Some(key) if state.api_keys.contains(&key.to_string()) => Ok(next.run(req).await),
-        Some(_) => {
-            tracing::warn!("Invalid API key attempted");
-            Err((
-                StatusCode::UNAUTHORIZED,
+    let valid = match api_key {
+        Some(key) => db::key_is_active(&state.db, key).await.map_err(|error| {
+            tracing::error!("API key lookup failed: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "Invalid API key".to_string(),
+                    error: "Authentication unavailable".into(),
                 }),
-            ))
-        }
-        None => {
-            tracing::warn!("Missing API key");
-            Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "API key required. Please provide X-API-Key header or Authorization: Bearer <key>".to_string(),
-                }),
-            ))
-        }
+            )
+        })?,
+        None => false,
+    };
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Missing or invalid API key".into(),
+            }),
+        ));
     }
+    Ok(next.run(req).await)
+}
+
+fn service_config() -> Result<(u16, String, String)> {
+    let port = dotenvy::var("PORT")
+        .unwrap_or_else(|_| "3000".into())
+        .parse::<u16>()?;
+    let base_url =
+        normalize_base_url(&dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://qkgo.de".into()))?;
+    let secret =
+        dotenvy::var("ALTCHA_SECRET").map_err(|_| anyhow::anyhow!("ALTCHA_SECRET must be set"))?;
+    anyhow::ensure!(!secret.trim().is_empty(), "ALTCHA_SECRET must not be empty");
+    // Do not silently retain environment keys that cannot be revoked using the CLI.
+    anyhow::ensure!(
+        dotenvy::var("API_KEYS")
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "API_KEYS is no longer supported. Remove it and create keys with quickgo api-key create"
+    );
+    Ok((port, base_url, secret))
 }
 
 #[tokio::main]
@@ -131,45 +157,30 @@ async fn main() -> Result<()> {
         Err(error) => return Err(error.into()),
     }
 
-    let port: u16 = dotenvy::var("PORT")
-        .unwrap_or_else(|_| "3000".to_string())
-        .parse()
-        .expect("PORT must be a valid number");
-
-    let base_url = normalize_base_url(
-        &dotenvy::var("BASE_URL").unwrap_or_else(|_| "https://qkgo.de".to_string()),
-    )?;
-
-    let api_keys_str = dotenvy::var("API_KEYS").expect("API_KEYS environment variable must be set");
-
-    let api_keys: Vec<String> = api_keys_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if api_keys.is_empty() {
-        panic!("At least one API key must be configured in API_KEYS");
+    let cli = cli::Cli::parse();
+    if !matches!(cli.command, cli::Command::Serve) {
+        return cli::run_local(&cli).await;
     }
-
-    let altcha_secret = dotenvy::var("ALTCHA_SECRET").expect("ALTCHA_SECRET must be set");
-    anyhow::ensure!(
-        !altcha_secret.trim().is_empty(),
-        "ALTCHA_SECRET must not be empty"
-    );
-    tracing::info!("Loaded {} API key(s)", api_keys.len());
-    tracing::info!("Using base URL: {}", base_url);
-
-    let database_path = dotenvy::var("DATABASE_PATH").unwrap_or_else(|_| "urls.db".to_string());
-    let db = setup_database(&database_path).await?;
+    let (port, base_url, altcha_secret) = service_config()?;
+    let db = setup_database(&cli.database_path).await?;
 
     let app_state = AppState {
         db,
         base_url,
-        api_keys,
         altcha_secret,
     };
 
+    let app = build_router(app_state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+
+    tracing::info!("QuickGo listening on http://0.0.0.0:{}", port);
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn build_router(app_state: AppState) -> Router {
     let static_service = ServeDir::new("static").append_index_html_on_directories(false);
 
     let public_routes = Router::new()
@@ -181,12 +192,12 @@ async fn main() -> Result<()> {
 
     let api_routes = Router::new()
         .route("/api/v1/shorten", post(create_url))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
             validate_api_key,
         ));
 
-    let app = Router::new()
+    Router::new()
         .merge(public_routes)
         .merge(api_routes)
         .layer(
@@ -199,45 +210,51 @@ async fn main() -> Result<()> {
                 )
                 .layer(CsrfLayer::new(CsrfConfig::default())),
         )
-        .with_state(app_state);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-
-    tracing::info!("URL Shortener listening on http://0.0.0.0:{}", port);
-    axum::serve(listener, app).await?;
-
-    Ok(())
+        .with_state(app_state)
+        .layer(middleware::from_fn(no_store))
 }
 
-async fn setup_database(path: &str) -> Result<SqlitePool, sqlx::Error> {
-    let options = if path == ":memory:" {
-        "sqlite::memory:".parse::<sqlx::sqlite::SqliteConnectOptions>()?
-    } else {
-        sqlx::sqlite::SqliteConnectOptions::new().filename(path)
-    };
-    let pool = SqlitePool::connect_with(
-        options
-            .create_if_missing(true)
-            .pragma("journal_mode", "WAL")
-            .pragma("synchronous", "NORMAL")
-            .pragma("cache_size", "1000")
-            .pragma("foreign_keys", "true")
-            .pragma("temp_store", "memory"),
-    )
-    .await?;
+async fn no_store(req: Request<Body>, next: Next) -> Response {
+    let dynamic = !req.uri().path().starts_with("/static/") && req.uri().path() != "/favicon.ico";
+    let mut response = next.run(req).await;
+    if dynamic {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS urls (
-            short_code TEXT PRIMARY KEY CHECK(length(short_code) <= 20),
-            original_url TEXT NOT NULL CHECK(length(original_url) <= 2048),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )",
-    )
-    .execute(&pool)
-    .await?;
+async fn setup_database(path: &str) -> Result<SqlitePool> {
+    db::setup(path).await
+}
 
-    tracing::info!("Database pool initialized with {} connections", pool.size());
-    Ok(pool)
+// Keep static pages and API namespaces out of the short-code namespace.
+const RESERVED_PATHS: &[&str] = &[
+    "about",
+    "api",
+    "static",
+    "favicon.ico",
+    "robots.txt",
+    "health",
+    "healthz",
+    "ready",
+    "readyz",
+    "admin",
+    "revoke",
+    "login",
+    "logout",
+    "assets",
+    "contact",
+    "privacy",
+    "terms",
+];
+
+fn is_reserved(code: &str) -> bool {
+    RESERVED_PATHS
+        .iter()
+        .any(|path| code.eq_ignore_ascii_case(path))
 }
 
 fn normalize_base_url(value: &str) -> Result<String> {
@@ -331,7 +348,10 @@ async fn root(
 
     let template = IndexTemplate {
         base_url: app_state.base_url.clone(),
-        authenticity_token: token.authenticity_token().unwrap(),
+        authenticity_token: token.authenticity_token().map_err(|_| HtmlError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Failed to generate security token".into(),
+        })?,
         altcha_challenge: challenge_base64,
     };
 
@@ -393,16 +413,12 @@ async fn create_url_form(
         });
     }
 
-    let verification = verify_altcha(&app_state.altcha_secret, &payload.altcha).await;
-    if let Err(error_message) = verification {
-        tracing::warn!("ALTCHA verification failed: {}", error_message);
-        return Err(HtmlError {
+    let challenge =
+        verify_altcha(&app_state.altcha_secret, &payload.altcha).map_err(|message| HtmlError {
             status: StatusCode::BAD_REQUEST,
-            message: error_message,
-        });
-    }
-
-    let result = shorten_url(app_state, payload.url).await;
+            message,
+        })?;
+    let result = shorten_url_with_challenge(app_state, payload.url, Some(challenge)).await;
     match result {
         Ok(response) => {
             tracing::info!("Created short URL via form: {}", response.short_code);
@@ -437,6 +453,14 @@ async fn shorten_url(
     app_state: AppState,
     url: String,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    shorten_url_with_challenge(app_state, url, None).await
+}
+
+async fn shorten_url_with_challenge(
+    app_state: AppState,
+    url: String,
+    challenge: Option<VerifiedChallenge>,
+) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     if let Err(error) = validate_url_length(&url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
@@ -452,23 +476,103 @@ async fn shorten_url(
     if let Err(error) = validate_url_format(&url) {
         return Err((StatusCode::BAD_REQUEST, ErrorResponse { error }));
     }
-    store_url_with_generator(&app_state, url, generate_short_code).await
+    let parsed = Url::parse(&url).map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "URL credentials are not allowed",
+        ));
+    }
+    let base = Url::parse(&app_state.base_url).expect("validated base URL");
+    if parsed.host_str() == base.host_str() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Links to this shortener are not allowed",
+        ));
+    }
+    let normalized = parsed.to_string();
+    validate_url_length(&normalized)
+        .map_err(|error| (StatusCode::BAD_REQUEST, ErrorResponse { error }))?;
+    store_url(&app_state, normalized, generate_short_code, challenge).await
 }
 
+#[cfg(test)]
 async fn store_url_with_generator(
     app_state: &AppState,
     url: String,
     mut generate: impl FnMut() -> String,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    store_url(app_state, url, &mut generate, None).await
+}
+
+fn api_error(status: StatusCode, message: &str) -> (StatusCode, ErrorResponse) {
+    (
+        status,
+        ErrorResponse {
+            error: message.into(),
+        },
+    )
+}
+
+fn database_error(error: sqlx::Error) -> (StatusCode, ErrorResponse) {
+    tracing::error!("Database operation failed: {}", error);
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Database operation failed. Please try again.",
+    )
+}
+
+async fn store_url(
+    app_state: &AppState,
+    url: String,
+    mut generate: impl FnMut() -> String,
+    challenge: Option<VerifiedChallenge>,
+) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    let mut tx = app_state.db.begin().await.map_err(database_error)?;
+    if let Some(challenge) = challenge {
+        let now = Utc::now().timestamp();
+        if challenge.expires_at <= now {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "CAPTCHA expired. Please refresh the page.",
+            ));
+        }
+        // The first statement is a write, so concurrent SQLite transactions serialize here.
+        sqlx::query("DELETE FROM used_challenges WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        let result =
+            sqlx::query("INSERT INTO used_challenges (challenge_id, expires_at) VALUES (?, ?)")
+                .bind(&challenge.id)
+                .bind(challenge.expires_at)
+                .execute(&mut *tx)
+                .await;
+        match result {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "CAPTCHA already used. Please refresh the page.",
+                ));
+            }
+            Err(error) => return Err(database_error(error)),
+        }
+    }
     for _ in 0..10 {
         let short_code = generate();
+        if is_reserved(&short_code) {
+            continue;
+        }
         match sqlx::query("INSERT INTO urls (short_code, original_url) VALUES (?, ?)")
             .bind(&short_code)
             .bind(&url)
-            .execute(&app_state.db)
+            .execute(&mut *tx)
             .await
         {
             Ok(_) => {
+                tx.commit().await.map_err(database_error)?;
                 return Ok(UrlResponse {
                     original_url: url,
                     short_url: format!("{}/{}", app_state.base_url, short_code),
@@ -476,29 +580,25 @@ async fn store_url_with_generator(
                 });
             }
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
-            Err(error) => {
-                tracing::error!("Database insert failed: {}", error);
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ErrorResponse {
-                        error: "Database error occurred. Please try again.".to_string(),
-                    },
-                ));
-            }
+            Err(error) => return Err(database_error(error)),
         }
     }
-    Err((
+    Err(api_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        ErrorResponse {
-            error: "Unable to generate unique short code. Please try again.".to_string(),
-        },
+        "Unable to generate unique short code. Please try again.",
     ))
 }
 
 async fn redirect_url(
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
-) -> Result<Redirect, HtmlError> {
+) -> Result<Response, HtmlError> {
+    if is_reserved(&short_code) {
+        return Err(HtmlError {
+            status: StatusCode::NOT_FOUND,
+            message: "Page not found".into(),
+        });
+    }
     if let Err(error) = validate_short_code_length(&short_code) {
         tracing::warn!("Short code validation failed in redirect: {}", error);
         return Err(HtmlError {
@@ -506,22 +606,40 @@ async fn redirect_url(
             message: "Invalid short code format.".to_string(),
         });
     }
-    if !short_code.chars().all(|c| c.is_alphanumeric()) {
+    if short_code.is_empty() || !short_code.bytes().all(|c| c.is_ascii_alphanumeric()) {
         tracing::warn!("Invalid characters in short code: {}", short_code);
         return Err(HtmlError {
             status: StatusCode::BAD_REQUEST,
             message: "Invalid short code format.".to_string(),
         });
     }
-    let result = sqlx::query("SELECT original_url FROM urls WHERE short_code = ?")
+    let result = sqlx::query("SELECT original_url, revoked_at FROM urls WHERE short_code = ?")
         .bind(&short_code)
         .fetch_optional(&app_state.db)
         .await;
     match result {
         Ok(Some(row)) => {
+            if row.get::<Option<String>, _>("revoked_at").is_some() {
+                let html = RevokedTemplate {}.render().map_err(|_| HtmlError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    message: "Unable to load page".into(),
+                })?;
+                return Ok((
+                    StatusCode::GONE,
+                    [(header::CACHE_CONTROL, "no-store")],
+                    Html(html),
+                )
+                    .into_response());
+            }
             let original_url: String = row.get("original_url");
-            tracing::debug!("Redirecting {}", short_code);
-            Ok(Redirect::permanent(&original_url))
+            Ok((
+                StatusCode::FOUND,
+                [
+                    (header::LOCATION, original_url.as_str()),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+            )
+                .into_response())
         }
         Ok(None) => {
             tracing::warn!("Short code not found: {}", short_code);
@@ -556,22 +674,38 @@ fn generate_short_code() -> String {
         .collect()
 }
 
-async fn verify_altcha(secret: &str, payload: &str) -> Result<(), String> {
-    if payload.is_empty() {
-        return Err("Missing CAPTCHA response".to_string());
+#[derive(Debug)]
+struct VerifiedChallenge {
+    id: String,
+    expires_at: i64,
+}
+
+fn verify_altcha(secret: &str, payload: &str) -> Result<VerifiedChallenge, String> {
+    let failure = || "CAPTCHA verification failed. Please refresh the page.".to_string();
+    if payload.is_empty() || payload.len() > 8192 {
+        return Err(failure());
     }
-
-    let decoded_payload = BASE64_STANDARD
-        .decode(payload)
-        .map_err(|_| format!("CAPTCHA verification failed"))?;
-
-    let string_payload = std::str::from_utf8(&decoded_payload)
-        .map_err(|_| format!("CAPTCHA verification failed"))?;
-
-    altcha_lib_rs::verify_json_solution(string_payload, secret, true)
-        .map_err(|_| format!("CAPTCHA verification failed"))?;
-
-    Ok(())
+    let decoded = BASE64_STANDARD.decode(payload).map_err(|_| failure())?;
+    let solution: altcha_lib_rs::Payload =
+        serde_json::from_slice(&decoded).map_err(|_| failure())?;
+    altcha_lib_rs::verify_solution(&solution, secret, true).map_err(|_| failure())?;
+    // Expiration must be present: the library permits payloads without it.
+    let query = solution.salt.split_once('?').ok_or_else(failure)?.1;
+    let expires: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "expires")
+        .collect();
+    if expires.len() != 1 {
+        return Err(failure());
+    }
+    let expires_at = expires[0].1.parse::<i64>().map_err(|_| failure())?;
+    if expires_at <= Utc::now().timestamp() {
+        return Err(failure());
+    }
+    // Identify the verified challenge, not raw JSON/base64 or mutable client metadata.
+    Ok(VerifiedChallenge {
+        id: solution.challenge,
+        expires_at,
+    })
 }
 
 #[derive(Deserialize)]
@@ -606,7 +740,6 @@ mod tests {
         AppState {
             db: setup_database(":memory:").await.unwrap(),
             base_url: "https://qkgo.de".into(),
-            api_keys: vec!["test-key".into()],
             altcha_secret: "test-secret".into(),
         }
     }
@@ -685,7 +818,7 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(attempts, 1);
+        assert_eq!(attempts, 0);
     }
 
     #[tokio::test]
@@ -730,6 +863,9 @@ mod tests {
         .render()
         .unwrap();
         assert!(index.contains("https://links.example.com:8443/"));
-        assert!(index.contains("<h1>qkgo</h1>"));
+        assert!(index.contains("<h1>QuickGo</h1>"));
     }
 }
+
+#[cfg(test)]
+mod management_tests;
