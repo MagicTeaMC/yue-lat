@@ -37,15 +37,19 @@ pub fn hash_key(key: &str) -> String {
     base16ct::lower::encode_string(&Sha256::digest(key.as_bytes()))
 }
 
-pub fn generate_secret(prefix: &str) -> Result<String> {
-    use base64::Engine;
-    let mut bytes = [0_u8; 32];
+pub fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
     rand::rngs::SysRng
         .try_fill_bytes(&mut bytes)
         .context("Cannot generate random credential")?;
+    Ok(bytes)
+}
+
+pub fn generate_secret(prefix: &str) -> Result<String> {
+    use base64::Engine;
     Ok(format!(
         "{prefix}{}",
-        base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(bytes)
+        base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(random_bytes::<32>()?)
     ))
 }
 

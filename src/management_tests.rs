@@ -7,6 +7,7 @@ async fn state() -> AppState {
         db: setup_database(":memory:").await.unwrap(),
         base_url: "https://qkgo.de".into(),
         altcha_secret: "test-secret".into(),
+        security: Default::default(),
     }
 }
 
@@ -29,7 +30,7 @@ fn solution(secret: &str, expires: Option<chrono::DateTime<Utc>>) -> String {
     BASE64_STANDARD.encode(serde_json::to_vec(&solution).unwrap())
 }
 
-async fn request(app: Router, path: &str) -> Response {
+pub(super) async fn request(app: Router, path: &str) -> Response {
     app.oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
         .await
         .unwrap()
@@ -185,6 +186,7 @@ async fn challenge_is_not_consumed_when_link_insert_fails() {
         },
         || "a".repeat(21),
         Some(verify_altcha(&state.altcha_secret, &payload).unwrap()),
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -305,6 +307,7 @@ async fn legacy_migration_preserves_links_and_replay_survives_reopen() {
         db: pool.clone(),
         base_url: "https://qkgo.de".into(),
         altcha_secret: "test-secret".into(),
+        security: Default::default(),
     };
     let payload = solution(
         &state.altcha_secret,
@@ -492,4 +495,227 @@ async fn concurrent_gets_share_a_quota_and_head_does_not_spend_it() {
         .await
         .unwrap();
     assert_eq!(count, 2);
+}
+
+async fn form_page(response: Response) -> (String, String, String) {
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let body = html_body(response).await;
+    let token = input_value(&body, "name=\"authenticity_token\" value=\"").to_owned();
+    (cookie, token, body)
+}
+
+async fn html_body(response: Response) -> String {
+    String::from_utf8(
+        to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn input_value<'a>(body: &'a str, prefix: &str) -> &'a str {
+    body.split_once(prefix)
+        .unwrap()
+        .1
+        .split('"')
+        .next()
+        .unwrap()
+}
+
+fn solve_form(body: &str) -> String {
+    let encoded = input_value(body, "challenge=\"data:application/json;base64,");
+    let challenge: altcha_lib_rs::Challenge =
+        serde_json::from_slice(&BASE64_STANDARD.decode(encoded).unwrap()).unwrap();
+    let number = altcha_lib_rs::solve_challenge(
+        &challenge.challenge,
+        &challenge.salt,
+        Some(challenge.algorithm),
+        Some(challenge.maxnumber),
+        0,
+    )
+    .unwrap();
+    BASE64_STANDARD.encode(
+        serde_json::to_vec(&altcha_lib_rs::Payload {
+            algorithm: challenge.algorithm,
+            challenge: challenge.challenge,
+            number,
+            salt: challenge.salt,
+            signature: challenge.signature,
+            took: None,
+        })
+        .unwrap(),
+    )
+}
+
+async fn form_post(
+    app: &Router,
+    path: &str,
+    cookie: &str,
+    csrf: &str,
+    proof: &str,
+    fields: &[(&str, &str)],
+) -> Response {
+    let body: String = {
+        let mut form = url::form_urlencoded::Serializer::new(String::new());
+        form.append_pair("authenticity_token", csrf)
+            .append_pair("altcha", proof);
+        form.extend_pairs(fields.iter().copied());
+        form.finish()
+    };
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .method("POST")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com/private".into(),
+            max_visits: Some(1),
+            password: Some("密碼 éü! xyz".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM urls WHERE short_code = ?")
+        .bind(&link.short_code)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(!hash.contains("密碼"));
+    assert_ne!(
+        hash,
+        state
+            .security
+            .password_work
+            .hash("密碼 éü! xyz".into())
+            .await
+            .unwrap()
+    );
+
+    let app = build_router(state);
+    let path = format!("/{}", link.short_code);
+    let page = request(app.clone(), &path).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(!page.headers().contains_key(header::LOCATION));
+    let (cookie, csrf, html) = form_page(page).await;
+    assert!(!html.contains("https://example.com/private"));
+    let proof = solve_form(&html);
+    let correct = [("password", "密碼 éü! xyz")];
+    let wrong = [("password", "wrong password")];
+    assert_eq!(
+        form_post(&app, &path, &cookie, "wrong", &proof, &correct)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        form_post(&app, &path, &cookie, &csrf, "invalid", &correct)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let retry = form_post(&app, &path, &cookie, &csrf, &proof, &wrong).await;
+    assert_eq!(retry.status(), StatusCode::UNAUTHORIZED);
+    assert!(!retry.headers().contains_key(header::LOCATION));
+    assert_eq!(
+        form_post(&app, &path, &cookie, &csrf, &proof, &correct)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let (cookie, csrf, html) = form_page(retry).await;
+    let response = form_post(&app, &path, &cookie, &csrf, &solve_form(&html), &correct).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "https://example.com/private"
+    );
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(request(app, &path).await.status(), StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn password_attempts_are_limited_per_link() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com".into(),
+            password: Some("test password".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let app = build_router(state.clone());
+    let path = format!("/{}", link.short_code);
+    let (cookie, csrf, _) = form_page(request(app.clone(), &path).await).await;
+    let expired = solution(
+        &state.altcha_secret,
+        Some(Utc::now() - chrono::TimeDelta::seconds(1)),
+    );
+    assert_eq!(
+        form_post(
+            &app,
+            &path,
+            &cookie,
+            &csrf,
+            &expired,
+            &[("password", "test password")]
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    for i in 0..11 {
+        let proof = fresh_solution(&state);
+        let response = form_post(
+            &app,
+            &path,
+            &cookie,
+            &csrf,
+            &proof,
+            &[("password", "wrong")],
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if i < 10 {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+}
+
+fn fresh_solution(state: &AppState) -> String {
+    solution(
+        &state.altcha_secret,
+        Some(Utc::now() + chrono::TimeDelta::minutes(5)),
+    )
 }

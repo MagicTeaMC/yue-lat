@@ -1,5 +1,6 @@
 mod cli;
 mod db;
+mod security;
 
 use altcha_lib_rs::ChallengeOptions;
 use anyhow::Result;
@@ -22,7 +23,10 @@ use http::Method;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tower::ServiceBuilder;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -44,8 +48,15 @@ struct ApiDocsTemplate {
 #[template(path = "index.html")]
 struct IndexTemplate {
     base_url: String,
-    authenticity_token: String,
-    altcha_challenge: String,
+    security: FormSecurity,
+}
+
+#[derive(Template)]
+#[template(path = "password.html")]
+struct PasswordTemplate {
+    short_code: String,
+    security: FormSecurity,
+    wrong_password: bool,
 }
 
 #[derive(Template)]
@@ -70,6 +81,21 @@ struct AppState {
     db: SqlitePool,
     base_url: String,
     altcha_secret: String,
+    security: Arc<Security>,
+}
+
+struct Security {
+    password_attempts: security::RateLimit<String>,
+    password_work: security::PasswordWork,
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self {
+            password_attempts: security::RateLimit::new(120, 10),
+            password_work: security::PasswordWork::default(),
+        }
+    }
 }
 
 struct HtmlError {
@@ -185,6 +211,7 @@ async fn main() -> Result<()> {
         db,
         base_url,
         altcha_secret,
+        security: Default::default(),
     };
 
     let app = build_router(app_state);
@@ -204,7 +231,10 @@ fn build_router(app_state: AppState) -> Router {
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
         .route("/favicon.ico", get(favicon))
-        .route("/{short_code}", get(redirect_url))
+        .route(
+            "/{short_code}",
+            get(redirect_url).post(verify_link_password),
+        )
         .nest_service("/static", static_service);
 
     let api_routes = Router::new()
@@ -340,37 +370,9 @@ async fn root(
     token: CsrfToken,
     State(app_state): State<AppState>,
 ) -> Result<(CsrfToken, Html<String>), HtmlError> {
-    let challenge = altcha_lib_rs::create_challenge(ChallengeOptions {
-        hmac_key: &app_state.altcha_secret,
-        max_number: Some(100_000),
-        expires: Some(Utc::now() + chrono::TimeDelta::minutes(5)),
-        ..Default::default()
-    })
-    .map_err(|e| {
-        tracing::error!("Failed to create ALTCHA challenge: {:?}", e);
-        HtmlError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "Failed to generate challenge. Please try again.".to_string(),
-        }
-    })?;
-
-    let challenge_json = serde_json::to_string(&challenge).map_err(|e| {
-        tracing::error!("Failed to serialize challenge: {}", e);
-        HtmlError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "Failed to generate challenge. Please try again.".to_string(),
-        }
-    })?;
-
-    let challenge_base64 = BASE64_STANDARD.encode(challenge_json.as_bytes());
-
     let template = IndexTemplate {
         base_url: app_state.base_url.clone(),
-        authenticity_token: token.authenticity_token().map_err(|_| HtmlError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "Failed to generate security token".into(),
-        })?,
-        altcha_challenge: challenge_base64,
+        security: FormSecurity::new(&app_state, &token)?,
     };
 
     match template.render() {
@@ -423,25 +425,19 @@ async fn create_url_form(
     State(app_state): State<AppState>,
     Form(payload): Form<CreateUrlFormRequest>,
 ) -> Result<Html<String>, HtmlError> {
-    if token.verify(&payload.authenticity_token).is_err() {
-        tracing::warn!("CSRF token verification failed");
-        return Err(HtmlError {
-            status: StatusCode::FORBIDDEN,
-            message: "Invalid security token. Please refresh the page and try again.".to_string(),
-        });
-    }
-
-    let challenge =
-        verify_altcha(&app_state.altcha_secret, &payload.altcha).map_err(|message| HtmlError {
-            status: StatusCode::BAD_REQUEST,
-            message,
-        })?;
+    let challenge = check_form(
+        &app_state,
+        &token,
+        &payload.authenticity_token,
+        &payload.altcha,
+    )?;
     let result = create_link(
         &app_state,
         CreateUrlRequest {
             url: payload.url,
             expires_at: parse_form_expiration(&payload.expires_at).map_err(HtmlError::from)?,
             max_visits: parse_form_max_visits(&payload.max_visits)?,
+            password: (!payload.password.is_empty()).then_some(payload.password),
         },
         Some(challenge),
     )
@@ -551,12 +547,28 @@ fn validate_max_visits(max_visits: Option<i64>) -> Result<(), (StatusCode, Error
 async fn create_link(
     app_state: &AppState,
     mut payload: CreateUrlRequest,
-    challenge: Option<VerifiedChallenge>,
+    mut challenge: Option<VerifiedChallenge>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     payload.url = normalize_destination(&payload.url, &app_state.base_url)?;
     validate_expiration(payload.expires_at)?;
     validate_max_visits(payload.max_visits)?;
-    store_url(app_state, payload, generate_short_code, challenge).await
+    let password_hash = match payload.password.take() {
+        Some(password) => {
+            if let Some(proof) = challenge.take() {
+                record_challenge(&app_state.db, proof).await?;
+            }
+            Some(app_state.security.password_work.hash(password).await?)
+        }
+        None => None,
+    };
+    store_url(
+        app_state,
+        payload,
+        generate_short_code,
+        challenge,
+        password_hash,
+    )
+    .await
 }
 
 fn normalize_destination(url: &str, base_url: &str) -> Result<String, (StatusCode, ErrorResponse)> {
@@ -611,6 +623,7 @@ async fn store_url_with_generator(
         },
         &mut generate,
         None,
+        None,
     )
     .await
 }
@@ -637,38 +650,11 @@ async fn store_url(
     payload: CreateUrlRequest,
     mut generate: impl FnMut() -> String,
     challenge: Option<VerifiedChallenge>,
+    password_hash: Option<String>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     let mut tx = app_state.db.begin().await.map_err(database_error)?;
     if let Some(challenge) = challenge {
-        let now = Utc::now().timestamp();
-        if challenge.expires_at <= now {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "CAPTCHA expired. Please refresh the page.",
-            ));
-        }
-        // The first statement is a write, so concurrent SQLite transactions serialize here.
-        sqlx::query("DELETE FROM used_challenges WHERE expires_at <= ?")
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(database_error)?;
-        let result =
-            sqlx::query("INSERT INTO used_challenges (challenge_id, expires_at) VALUES (?, ?)")
-                .bind(&challenge.id)
-                .bind(challenge.expires_at)
-                .execute(&mut *tx)
-                .await;
-        match result {
-            Ok(_) => {}
-            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    "CAPTCHA already used. Please refresh the page.",
-                ));
-            }
-            Err(error) => return Err(database_error(error)),
-        }
+        consume_challenge(&mut tx, challenge).await?;
     }
     for _ in 0..10 {
         let short_code = generate();
@@ -680,13 +666,14 @@ async fn store_url(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
         })?;
         match sqlx::query(
-            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits, password_hash) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&short_code)
         .bind(&payload.url)
         .bind(db::hash_key(&edit_token))
         .bind(payload.expires_at)
         .bind(payload.max_visits)
+        .bind(&password_hash)
         .execute(&mut *tx)
         .await
         {
@@ -709,7 +696,73 @@ async fn store_url(
     ))
 }
 
+async fn consume_challenge(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    challenge: VerifiedChallenge,
+) -> Result<(), (StatusCode, ErrorResponse)> {
+    let now = Utc::now().timestamp();
+    if challenge.expires_at <= now {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "CAPTCHA expired. Please refresh the page.",
+        ));
+    }
+    // The first statement is a write, so concurrent SQLite transactions serialize here.
+    sqlx::query("DELETE FROM used_challenges WHERE expires_at <= ?")
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    let result = sqlx::query(
+        "INSERT INTO used_challenges (challenge_id, expires_at) SELECT ?, ? WHERE ? > unixepoch()",
+    )
+    .bind(&challenge.id)
+    .bind(challenge.expires_at)
+    .bind(challenge.expires_at)
+    .execute(&mut **tx)
+    .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "CAPTCHA expired. Please refresh the page.",
+            ));
+        }
+        Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "CAPTCHA already used. Please refresh the page.",
+            ));
+        }
+        Err(error) => return Err(database_error(error)),
+    }
+    Ok(())
+}
+
+async fn verify_sensitive_form(
+    app: &AppState,
+    token: &CsrfToken,
+    authenticity_token: &str,
+    altcha: &str,
+) -> Result<(), HtmlError> {
+    let challenge = check_form(app, token, authenticity_token, altcha)?;
+    record_challenge(&app.db, challenge).await?;
+    Ok(())
+}
+
+async fn record_challenge(
+    db: &SqlitePool,
+    challenge: VerifiedChallenge,
+) -> Result<(), (StatusCode, ErrorResponse)> {
+    let mut tx = db.begin().await.map_err(database_error)?;
+    consume_challenge(&mut tx, challenge).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(())
+}
+
 async fn redirect_url(
+    token: CsrfToken,
     method: Method,
     Path(short_code): Path<String>,
     State(app_state): State<AppState>,
@@ -720,6 +773,9 @@ async fn redirect_url(
         if let Some(response) = link.unavailable()? {
             return Ok(response);
         }
+        if link.password_hash.is_some() {
+            return password_page(&app_state, token, short_code, false);
+        }
         let response = link.redirect(StatusCode::FOUND)?;
         if method == Method::HEAD
             || link.max_visits.is_none()
@@ -728,9 +784,90 @@ async fn redirect_url(
             return Ok(response);
         }
     }
-    Err(HtmlError {
+    Err(link_changed())
+}
+
+#[derive(Deserialize)]
+struct PasswordForm {
+    password: String,
+    authenticity_token: String,
+    altcha: String,
+}
+
+async fn verify_link_password(
+    token: CsrfToken,
+    Path(short_code): Path<String>,
+    State(app): State<AppState>,
+    Form(form): Form<PasswordForm>,
+) -> Result<Response, HtmlError> {
+    validate_redirect_code(&short_code)?;
+    verify_sensitive_form(&app, &token, &form.authenticity_token, &form.altcha).await?;
+    let target = redirect_target(&app.db, &short_code).await?;
+    if let Some(response) = target.unavailable()? {
+        return Ok(response);
+    }
+    let Some(password_hash) = target.password_hash else {
+        return Err(link_changed());
+    };
+    app.security.password_attempts.check(short_code.clone())?;
+    if !app
+        .security
+        .password_work
+        .verify(form.password, password_hash.clone())
+        .await?
+    {
+        return password_page(&app, token, short_code, true);
+    }
+
+    for _ in 0..3 {
+        let target = redirect_target(&app.db, &short_code).await?;
+        if let Some(response) = target.unavailable()? {
+            return Ok(response);
+        }
+        if target.password_hash.as_deref() != Some(&password_hash) {
+            return Err(link_changed());
+        }
+        let response = target.redirect(StatusCode::SEE_OTHER)?;
+        if target.max_visits.is_none() || target.consume_visit(&app.db, &short_code).await? {
+            return Ok(response);
+        }
+    }
+    Err(link_changed())
+}
+
+fn link_changed() -> HtmlError {
+    HtmlError {
         status: StatusCode::CONFLICT,
         message: "The link changed. Please try again.".into(),
+    }
+}
+
+fn password_page(
+    app: &AppState,
+    token: CsrfToken,
+    short_code: String,
+    wrong_password: bool,
+) -> Result<Response, HtmlError> {
+    let template = PasswordTemplate {
+        short_code,
+        security: FormSecurity::new(app, &token)?,
+        wrong_password,
+    };
+    let status = if wrong_password {
+        StatusCode::UNAUTHORIZED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, token, render_html(template)?).into_response())
+}
+
+fn render_html(template: impl Template) -> Result<Html<String>, HtmlError> {
+    template.render().map(Html).map_err(|error| {
+        tracing::error!("Template rendering error: {error}");
+        HtmlError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Unable to load page".into(),
+        }
     })
 }
 
@@ -764,11 +901,12 @@ struct RedirectTarget {
     expires_at: Option<i64>,
     max_visits: Option<i64>,
     visit_count: i64,
+    password_hash: Option<String>,
 }
 
 async fn redirect_target(db: &SqlitePool, short_code: &str) -> Result<RedirectTarget, HtmlError> {
     sqlx::query_as(
-        "SELECT original_url, revoked_at, expires_at, max_visits, visit_count
+        "SELECT original_url, revoked_at, expires_at, max_visits, visit_count, password_hash
          FROM urls WHERE short_code = ?",
     )
     .bind(short_code)
@@ -821,12 +959,13 @@ impl RedirectTarget {
         // Count only redirects for the destination we are about to send.
         let result = sqlx::query(
             "UPDATE urls SET visit_count = visit_count + 1
-             WHERE short_code = ? AND original_url = ? AND revoked_at IS NULL
+             WHERE short_code = ? AND original_url = ? AND password_hash IS ? AND revoked_at IS NULL
                AND (expires_at IS NULL OR expires_at > unixepoch())
                AND max_visits IS NOT NULL AND visit_count < max_visits",
         )
         .bind(code)
         .bind(&self.original_url)
+        .bind(&self.password_hash)
         .execute(db)
         .await
         .map_err(database_error)?;
@@ -844,6 +983,48 @@ fn generate_short_code() -> String {
             SHORT_CODE_ALPHABET[idx] as char
         })
         .collect()
+}
+
+struct FormSecurity {
+    authenticity_token: String,
+    altcha_challenge: String,
+}
+
+impl FormSecurity {
+    fn new(app: &AppState, token: &CsrfToken) -> Result<Self, HtmlError> {
+        let failure = || HtmlError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "Failed to generate security challenge. Please try again.".into(),
+        };
+        let challenge = altcha_lib_rs::create_challenge(ChallengeOptions {
+            hmac_key: &app.altcha_secret,
+            max_number: Some(100_000),
+            expires: Some(Utc::now() + chrono::TimeDelta::minutes(5)),
+            ..Default::default()
+        })
+        .map_err(|_| failure())?;
+        let challenge = serde_json::to_vec(&challenge).map_err(|_| failure())?;
+        Ok(Self {
+            authenticity_token: token.authenticity_token().map_err(|_| failure())?,
+            altcha_challenge: BASE64_STANDARD.encode(challenge),
+        })
+    }
+}
+
+fn check_form(
+    app: &AppState,
+    token: &CsrfToken,
+    authenticity_token: &str,
+    altcha: &str,
+) -> Result<VerifiedChallenge, HtmlError> {
+    token.verify(authenticity_token).map_err(|_| HtmlError {
+        status: StatusCode::FORBIDDEN,
+        message: "Invalid security token. Please refresh the page and try again.".into(),
+    })?;
+    verify_altcha(&app.altcha_secret, altcha).map_err(|message| HtmlError {
+        status: StatusCode::BAD_REQUEST,
+        message,
+    })
 }
 
 #[derive(Debug)]
@@ -902,6 +1083,7 @@ struct CreateUrlRequest {
     url: String,
     expires_at: Option<i64>,
     max_visits: Option<i64>,
+    password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -911,6 +1093,8 @@ struct CreateUrlFormRequest {
     expires_at: String,
     #[serde(default)]
     max_visits: String,
+    #[serde(default)]
+    password: String,
     authenticity_token: String,
     altcha: String,
 }
@@ -923,7 +1107,7 @@ struct UrlResponse {
     edit_token: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -938,6 +1122,7 @@ mod tests {
             db: setup_database(":memory:").await.unwrap(),
             base_url: "https://qkgo.de".into(),
             altcha_secret: "test-secret".into(),
+            security: Default::default(),
         }
     }
 
@@ -983,9 +1168,8 @@ mod tests {
             row.get::<String, _>("original_url"),
             "https://example.com/old"
         );
-        let redirect = redirect_url(Method::GET, Path("abcd".into()), State(state)).await;
-        assert!(redirect.is_ok());
-        let response = redirect.ok().unwrap().into_response();
+        let redirect = super::management_tests::request(build_router(state), "/abcd").await;
+        let response = redirect;
         assert_eq!(
             response.headers()[header::LOCATION],
             "https://example.com/old"
@@ -1054,8 +1238,10 @@ mod tests {
         assert!(!docs.contains("yue.lat"));
         let index = IndexTemplate {
             base_url: base_url.into(),
-            authenticity_token: "test-token".into(),
-            altcha_challenge: "test-challenge".into(),
+            security: FormSecurity {
+                authenticity_token: "test-token".into(),
+                altcha_challenge: "test-challenge".into(),
+            },
         }
         .render()
         .unwrap();
