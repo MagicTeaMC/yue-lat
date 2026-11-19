@@ -151,7 +151,7 @@ async fn challenge_replay_uses_verified_identity_not_client_metadata() {
     );
     let mut changed: serde_json::Value =
         serde_json::from_slice(&BASE64_STANDARD.decode(&payload).unwrap()).unwrap();
-    changed["took"] = serde_json::json!(100);
+    changed["took"] = serde_json::json!(100.5);
     let changed = BASE64_STANDARD.encode(serde_json::to_vec_pretty(&changed).unwrap());
     let challenge = verify_altcha(&state.altcha_secret, &changed).unwrap();
     let error = shorten_url_with_challenge(

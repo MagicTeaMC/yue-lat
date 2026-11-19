@@ -19,7 +19,7 @@ use base64::prelude::BASE64_STANDARD;
 use chrono::Utc;
 use clap::Parser;
 use http::Method;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use tower::ServiceBuilder;
@@ -680,14 +680,31 @@ struct VerifiedChallenge {
     expires_at: i64,
 }
 
+#[derive(Deserialize)]
+struct AltchaResponse {
+    algorithm: altcha_lib_rs::algorithm::AltchaAlgorithm,
+    challenge: String,
+    number: u64,
+    salt: String,
+    signature: String,
+}
+
 fn verify_altcha(secret: &str, payload: &str) -> Result<VerifiedChallenge, String> {
     let failure = || "CAPTCHA verification failed. Please refresh the page.".to_string();
     if payload.is_empty() || payload.len() > 8192 {
         return Err(failure());
     }
     let decoded = BASE64_STANDARD.decode(payload).map_err(|_| failure())?;
-    let solution: altcha_lib_rs::Payload =
-        serde_json::from_slice(&decoded).map_err(|_| failure())?;
+    let response: AltchaResponse = serde_json::from_slice(&decoded).map_err(|_| failure())?;
+    // The widget reports elapsed time as a decimal. It is client metadata, not part of the proof.
+    let solution = altcha_lib_rs::Payload {
+        algorithm: response.algorithm,
+        challenge: response.challenge,
+        number: response.number,
+        salt: response.salt,
+        signature: response.signature,
+        took: None,
+    };
     altcha_lib_rs::verify_solution(&solution, secret, true).map_err(|_| failure())?;
     // Expiration must be present: the library permits payloads without it.
     let query = solution.salt.split_once('?').ok_or_else(failure)?.1;

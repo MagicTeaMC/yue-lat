@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use rand::TryRngCore;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use std::time::Duration;
@@ -34,7 +34,7 @@ pub async fn setup(path: &str) -> Result<SqlitePool> {
 }
 
 pub fn hash_key(key: &str) -> String {
-    format!("{:x}", Sha256::digest(key.as_bytes()))
+    base16ct::lower::encode_string(&Sha256::digest(key.as_bytes()))
 }
 
 pub async fn create_key(db: &SqlitePool, name: &str) -> Result<(i64, String)> {
@@ -43,7 +43,7 @@ pub async fn create_key(db: &SqlitePool, name: &str) -> Result<(i64, String)> {
         "Name must be 1–100 bytes"
     );
     let mut bytes = [0_u8; 32];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut bytes)
         .context("Cannot generate API key")?;
     use base64::Engine;
