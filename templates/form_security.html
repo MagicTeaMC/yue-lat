@@ -1,0 +1,4 @@
+<input type="hidden" name="authenticity_token" value="{{ security.authenticity_token }}">
+<div style="margin: 1rem 0;">
+    <altcha-widget challenge="data:application/json;base64,{{ security.altcha_challenge }}" name="altcha"></altcha-widget>
+</div>

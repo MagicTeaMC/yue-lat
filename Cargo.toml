@@ -1,6 +1,6 @@
 [package]
 name = "quickgo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -30,3 +30,4 @@ serde_json = "1.0.154"
 altcha-lib-rs = { version = "0.3.3", features = ["json"] }
 chrono = "0.4.45"
 base64 = "0.23.1"
+argon2 = "0.5.3"
