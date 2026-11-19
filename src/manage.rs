@@ -1,0 +1,279 @@
+use askama::Template;
+use axum::{
+    Extension, Form,
+    extract::{ConnectInfo, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use axum_csrf::CsrfToken;
+use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
+use chrono::{DateTime, SecondsFormat};
+use serde::{Deserialize, Serialize};
+use sqlx::{QueryBuilder, Sqlite};
+use std::net::SocketAddr;
+
+use crate::{
+    AppState, ErrorResponse, FormSecurity, HtmlError, api_error, database_error, db,
+    normalize_destination, parse_form_expiration, parse_form_max_visits, render_html,
+    validate_expiration, validate_max_visits, verify_sensitive_form,
+};
+
+type ManagementError = (StatusCode, ErrorResponse);
+
+#[derive(sqlx::FromRow, Serialize)]
+struct LinkInfo {
+    short_code: String,
+    original_url: String,
+    expires_at: Option<i64>,
+    has_password: bool,
+    max_visits: Option<i64>,
+    visit_count: i64,
+    updated_at: Option<String>,
+    #[serde(skip)]
+    revoked: bool,
+}
+
+const INFO_COLUMNS: &str =
+    "short_code, original_url, expires_at, password_hash IS NOT NULL AS has_password,
+    max_visits, visit_count, updated_at, revoked_at IS NOT NULL AS revoked";
+
+struct EditTokenHash {
+    hash: String,
+    short_code: Option<String>,
+}
+
+impl EditTokenHash {
+    fn parse(token: &str) -> Result<Self, ManagementError> {
+        let token = token.trim();
+        let valid = token.strip_prefix("qke_").is_some_and(|secret| {
+            secret.len() == 43
+                && BASE64_URL_SAFE_NO_PAD
+                    .decode(secret)
+                    .is_ok_and(|bytes| bytes.len() == 32)
+        });
+        if !valid {
+            return Err(managed_link_not_found());
+        }
+        Ok(Self {
+            hash: db::hash_key(token),
+            short_code: None,
+        })
+    }
+
+    fn push_filter(&self, query: &mut QueryBuilder<Sqlite>) {
+        query.push("edit_token_hash = ").push_bind(&self.hash);
+        if let Some(code) = &self.short_code {
+            query.push(" AND short_code = ").push_bind(code);
+        }
+    }
+}
+
+fn managed_link_not_found() -> ManagementError {
+    api_error(StatusCode::NOT_FOUND, "No link found for these credentials")
+}
+
+async fn find_link(app: &AppState, access: &EditTokenHash) -> Result<LinkInfo, ManagementError> {
+    let mut query = QueryBuilder::new("SELECT ");
+    query.push(INFO_COLUMNS).push(" FROM urls WHERE ");
+    access.push_filter(&mut query);
+    let info: LinkInfo = query
+        .build_query_as()
+        .fetch_optional(&app.db)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(managed_link_not_found)?;
+    if info.revoked {
+        return Err(api_error(
+            StatusCode::GONE,
+            "This link has been permanently revoked",
+        ));
+    }
+    Ok(info)
+}
+
+#[derive(Default)]
+struct EditSettings {
+    url: Option<String>,
+    expires_at: Option<Option<i64>>,
+    max_visits: Option<Option<i64>>,
+    password: Option<Option<String>>,
+}
+
+async fn update_link(
+    app: &AppState,
+    access: &EditTokenHash,
+    settings: EditSettings,
+) -> Result<LinkInfo, ManagementError> {
+    let current = find_link(app, access).await?;
+    if settings.url.is_none()
+        && settings.expires_at.is_none()
+        && settings.max_visits.is_none()
+        && settings.password.is_none()
+    {
+        return Ok(current);
+    }
+    if let Some(expiration) = settings.expires_at {
+        validate_expiration(expiration)?;
+    }
+    if let Some(max_visits) = settings.max_visits {
+        validate_max_visits(max_visits)?;
+    }
+
+    let mut query = QueryBuilder::new("UPDATE urls SET updated_at = CURRENT_TIMESTAMP");
+    if let Some(url) = settings.url {
+        query
+            .push(", original_url = ")
+            .push_bind(normalize_destination(&url, &app.base_url)?);
+    }
+    if let Some(expiration) = settings.expires_at {
+        query.push(", expires_at = ").push_bind(expiration);
+    }
+    if let Some(max_visits) = settings.max_visits {
+        query.push(", max_visits = ").push_bind(max_visits);
+    }
+    if let Some(password) = settings.password {
+        let hash = match password {
+            Some(password) => Some(app.security.password_work.hash(password).await?),
+            None => None,
+        };
+        query.push(", password_hash = ").push_bind(hash);
+    }
+    // Recheck the credential and permanent revocation in the write itself.
+    query.push(" WHERE revoked_at IS NULL AND ");
+    access.push_filter(&mut query);
+    query.push(" RETURNING ").push(INFO_COLUMNS);
+    match query
+        .build_query_as()
+        .fetch_optional(&app.db)
+        .await
+        .map_err(database_error)?
+    {
+        Some(info) => Ok(info),
+        None => find_link(app, access).await,
+    }
+}
+
+#[derive(Template)]
+#[template(path = "edit.html")]
+struct EditTemplate {
+    security: FormSecurity,
+    link: Option<LinkInfo>,
+    expiration: String,
+    max_visits: String,
+    saved: bool,
+}
+
+fn edit_page(
+    app: &AppState,
+    token: CsrfToken,
+    link: Option<LinkInfo>,
+    saved: bool,
+) -> Result<Response, HtmlError> {
+    let expiration = link
+        .as_ref()
+        .and_then(|info| info.expires_at)
+        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+        .map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .unwrap_or_default();
+    let max_visits = link
+        .as_ref()
+        .and_then(|info| info.max_visits)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let template = EditTemplate {
+        security: FormSecurity::new(app, &token)?,
+        link,
+        expiration,
+        max_visits,
+        saved,
+    };
+    Ok((token, render_html(template)?).into_response())
+}
+
+pub async fn edit_form(
+    token: CsrfToken,
+    State(app): State<AppState>,
+) -> Result<Response, HtmlError> {
+    edit_page(&app, token, None, false)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EditAction {
+    Lookup,
+    Save,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PasswordAction {
+    #[default]
+    Keep,
+    Set,
+    Remove,
+}
+
+#[derive(Deserialize)]
+pub struct EditForm {
+    action: EditAction,
+    edit_token: String,
+    #[serde(default)]
+    authenticity_token: String,
+    #[serde(default)]
+    altcha: String,
+    short_code: Option<String>,
+    url: Option<String>,
+    expires_at: Option<String>,
+    max_visits: Option<String>,
+    #[serde(default)]
+    password_action: PasswordAction,
+    #[serde(default)]
+    password: String,
+}
+
+pub async fn submit_edit(
+    token: CsrfToken,
+    State(app): State<AppState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    Form(form): Form<EditForm>,
+) -> Result<Response, HtmlError> {
+    verify_sensitive_form(&app, &token, &form.authenticity_token, &form.altcha).await?;
+    app.security
+        .edit_attempts
+        .check(peer.map(|Extension(ConnectInfo(addr))| addr.ip()))?;
+    let mut access = EditTokenHash::parse(&form.edit_token)?;
+    match form.action {
+        EditAction::Lookup => {
+            let link = find_link(&app, &access).await?;
+            edit_page(&app, token, Some(link), false)
+        }
+        EditAction::Save => {
+            access.short_code = Some(form.short_code.ok_or_else(|| {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "Look up the link before saving changes",
+                )
+            })?);
+            let settings = EditSettings {
+                url: form.url,
+                expires_at: form
+                    .expires_at
+                    .as_deref()
+                    .map(parse_form_expiration)
+                    .transpose()?,
+                max_visits: form
+                    .max_visits
+                    .as_deref()
+                    .map(parse_form_max_visits)
+                    .transpose()?,
+                password: match form.password_action {
+                    PasswordAction::Keep => None,
+                    PasswordAction::Set => Some(Some(form.password)),
+                    PasswordAction::Remove => Some(None),
+                },
+            };
+            let link = update_link(&app, &access, settings).await?;
+            edit_page(&app, token, Some(link), true)
+        }
+    }
+}

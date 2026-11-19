@@ -719,3 +719,167 @@ fn fresh_solution(state: &AppState) -> String {
         Some(Utc::now() + chrono::TimeDelta::minutes(5)),
     )
 }
+
+#[tokio::test]
+async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_token() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com/old".into(),
+            expires_at: Some(Utc::now().timestamp() - 60),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let other = shorten_url(state.clone(), "https://example.com/other".into())
+        .await
+        .unwrap();
+    assert_ne!(link.edit_token, other.edit_token);
+    let hash: String = sqlx::query_scalar("SELECT edit_token_hash FROM urls WHERE short_code = ?")
+        .bind(&link.short_code)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(hash, db::hash_key(&link.edit_token));
+    assert_ne!(hash, link.edit_token);
+
+    let app = build_router(state.clone());
+    let start = request(app.clone(), "/edit").await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let (cookie, csrf, html) = form_page(start).await;
+    let proof = solve_form(&html);
+    let lookup = [("action", "lookup"), ("edit_token", &link.edit_token)];
+    assert_eq!(
+        form_post(&app, "/edit", &cookie, "wrong", &proof, &lookup)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        form_post(&app, "/edit", &cookie, &csrf, "wrong", &lookup)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let found = form_post(&app, "/edit", &cookie, &csrf, &proof, &lookup).await;
+    assert_eq!(found.status(), StatusCode::OK);
+    assert_eq!(found.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        !found
+            .headers()
+            .values()
+            .any(|value| value.to_str().unwrap_or("").contains(&link.edit_token))
+    );
+    let (cookie, csrf, html) = form_page(found).await;
+    assert!(html.contains("https://example.com/old"));
+    assert!(!html.contains(&link.edit_token));
+    assert!(!html.contains(&hash));
+
+    let mut save = [
+        ("action", "save"),
+        ("edit_token", other.edit_token.as_str()),
+        ("short_code", &link.short_code),
+        ("url", "https://example.com/new"),
+        ("expires_at", ""),
+        ("max_visits", "3"),
+        ("password_action", "set"),
+        ("password", "fixture 8Zy!X"),
+    ];
+    assert_eq!(
+        form_post(&app, "/edit", &cookie, &csrf, &proof, &save)
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        form_post(
+            &app,
+            "/edit",
+            &cookie,
+            &csrf,
+            &fresh_solution(&state),
+            &save
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    save[1].1 = &link.edit_token;
+    let save_proof = solve_form(&html);
+    assert_eq!(
+        form_post(&app, "/edit", &cookie, "wrong", &save_proof, &save)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let saved = form_post(&app, "/edit", &cookie, &csrf, &save_proof, &save).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let (_, _, html) = form_page(saved).await;
+    assert!(html.contains("Link settings saved."));
+    assert!(html.contains("https://example.com/new"));
+    assert!(!html.contains(&link.edit_token));
+    assert!(!html.contains("fixture 8Zy!X"));
+    let response = request(app.clone(), &format!("/{}", link.short_code)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(html_body(response).await.contains("Password required"));
+
+    db::revoke_link(&state.db, &link.short_code, "abuse")
+        .await
+        .unwrap();
+    assert_eq!(
+        form_post(
+            &app,
+            "/edit",
+            &cookie,
+            &csrf,
+            &fresh_solution(&state),
+            &lookup
+        )
+        .await
+        .status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        form_post(
+            &app,
+            "/edit",
+            &cookie,
+            &csrf,
+            &fresh_solution(&state),
+            &save
+        )
+        .await
+        .status(),
+        StatusCode::GONE
+    );
+}
+
+#[tokio::test]
+async fn edit_token_guesses_are_rate_limited() {
+    let state = state().await;
+    let app = build_router(state.clone());
+    let (cookie, csrf, _) = form_page(request(app.clone(), "/edit").await).await;
+    let fields = [("action", "lookup"), ("edit_token", "invalid")];
+    for i in 0..31 {
+        let response = form_post(
+            &app,
+            "/edit",
+            &cookie,
+            &csrf,
+            &fresh_solution(&state),
+            &fields,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if i < 30 {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+}

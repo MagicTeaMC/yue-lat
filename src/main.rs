@@ -1,5 +1,6 @@
 mod cli;
 mod db;
+mod manage;
 mod security;
 
 use altcha_lib_rs::ChallengeOptions;
@@ -86,6 +87,7 @@ struct AppState {
 
 struct Security {
     password_attempts: security::RateLimit<String>,
+    edit_attempts: security::RateLimit<Option<IpAddr>>,
     password_work: security::PasswordWork,
 }
 
@@ -93,6 +95,7 @@ impl Default for Security {
     fn default() -> Self {
         Self {
             password_attempts: security::RateLimit::new(120, 10),
+            edit_attempts: security::RateLimit::new(300, 30),
             password_work: security::PasswordWork::default(),
         }
     }
@@ -219,7 +222,11 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
 
     tracing::info!("QuickGo listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -230,6 +237,7 @@ fn build_router(app_state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
+        .route("/edit", get(manage::edit_form).post(manage::submit_edit))
         .route("/favicon.ico", get(favicon))
         .route(
             "/{short_code}",
@@ -513,7 +521,9 @@ fn parse_form_expiration(input: &str) -> Result<Option<i64>, (StatusCode, ErrorR
 }
 
 fn validate_expiration(expires_at: Option<i64>) -> Result<(), (StatusCode, ErrorResponse)> {
-    if expires_at.is_some_and(|value| chrono::DateTime::from_timestamp(value, 0).is_none()) {
+    // Limit to four-digit years so API dates round-trip through the HTML form.
+    const RFC3339_SECONDS: std::ops::RangeInclusive<i64> = -62_167_219_200..=253_402_300_799;
+    if expires_at.is_some_and(|value| !RFC3339_SECONDS.contains(&value)) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "Expiration is outside the supported range",
@@ -666,7 +676,7 @@ async fn store_url(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
         })?;
         match sqlx::query(
-            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits, password_hash) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits, password_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
         )
         .bind(&short_code)
         .bind(&payload.url)
@@ -790,7 +800,9 @@ async fn redirect_url(
 #[derive(Deserialize)]
 struct PasswordForm {
     password: String,
+    #[serde(default)]
     authenticity_token: String,
+    #[serde(default)]
     altcha: String,
 }
 
@@ -1095,7 +1107,9 @@ struct CreateUrlFormRequest {
     max_visits: String,
     #[serde(default)]
     password: String,
+    #[serde(default)]
     authenticity_token: String,
+    #[serde(default)]
     altcha: String,
 }
 

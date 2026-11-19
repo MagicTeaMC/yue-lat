@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block robots %}noindex, nofollow{% endblock %}
+{% block title %}Manage a link · QuickGo{% endblock %}
+{% block content %}
+<h1>Manage a link</h1>
+{% if saved %}
+<p role="status">Link settings saved.</p>
+{% endif %}
+<script type="module" src="/static/altcha.min.js"></script>
+<form method="post" action="/edit" autocomplete="off">
+    {% if let Some(info) = link %}
+    <p>Short code: <code>{{ info.short_code }}</code> · Counted uses: {{ info.visit_count }}</p>
+    <input type="hidden" name="action" value="save">
+    <input type="hidden" name="short_code" value="{{ info.short_code }}">
+    <label for="url">Destination URL</label>
+    <input id="url" name="url" type="url" value="{{ info.original_url }}" required>
+    <label for="expires-at">Expiration (include time zone, leave blank to remove)</label>
+    <input id="expires-at" name="expires_at" value="{{ expiration }}" placeholder="2030-06-15T12:00:00Z">
+    <label for="max-visits">Maximum uses (leave blank for unlimited)</label>
+    <input id="max-visits" name="max_visits" type="number" min="1" step="1" value="{{ max_visits }}">
+    <p>
+        <label for="password-action">Visitor password (currently {% if info.has_password %}set{% else %}unset{% endif %})</label>
+        <select id="password-action" name="password_action">
+            <option value="keep">Keep current setting</option>
+            <option value="set">Set a new password</option>
+            <option value="remove">Remove password</option>
+        </select>
+    </p>
+    <label for="password">New visitor password (8 characters minimum, 128 bytes maximum)</label>
+    <input id="password" name="password" type="password" autocomplete="off">
+    <label for="edit-token">Re-enter your Edit Token</label>
+    {% else %}
+    <input type="hidden" name="action" value="lookup">
+    <label for="edit-token">Edit Token</label>
+    {% endif %}
+    <input id="edit-token" name="edit_token" type="password" autocomplete="off" required>
+    {% include "form_security.html" %}
+    <button type="submit">{% if link.is_some() %}Save changes{% else %}Find link{% endif %}</button>
+</form>
+{% if link.is_some() %}<p><a href="/edit">Manage another link</a></p>{% endif %}
+{% endblock %}
