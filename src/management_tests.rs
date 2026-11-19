@@ -1234,3 +1234,124 @@ async fn a_committing_admin_revocation_wins_over_a_waiting_patch() {
     pool.close().await;
     std::fs::remove_file(path).unwrap();
 }
+
+#[tokio::test]
+async fn migration_from_v01_keeps_keys_revocations_and_existing_links() {
+    let path = std::env::temp_dir().join(format!("quickgo-v01-{}.db", rand::random::<u64>()));
+    let pool = db::open(path.to_str().unwrap(), true).await.unwrap();
+    db::MIGRATOR.run_to(2, &pool).await.unwrap();
+    let (id, key) = db::create_key(&pool, "existing bot").await.unwrap();
+    sqlx::query("INSERT INTO urls (short_code, original_url) VALUES ('legacy', 'https://example.com/old'), ('blocked', 'https://example.com/blocked')")
+        .execute(&pool).await.unwrap();
+    db::revoke_link(&pool, "blocked", "original reason")
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let pool = db::setup(path.to_str().unwrap()).await.unwrap();
+    let app = build_router(AppState {
+        db: pool.clone(),
+        ..state().await
+    });
+    let legacy_matches: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM urls WHERE short_code = 'legacy' AND edit_token_hash IS NULL
+         AND created_by_api_key_id IS NULL AND expires_at IS NULL AND password_hash IS NULL
+         AND max_visits IS NULL AND visit_count = 0 AND updated_at IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy_matches, 1);
+    let redirect = request(app.clone(), "/legacy").await;
+    assert_eq!(redirect.status(), StatusCode::FOUND);
+    assert_eq!(
+        redirect.headers()[header::LOCATION],
+        "https://example.com/old"
+    );
+    assert_eq!(
+        request(app.clone(), "/blocked").await.status(),
+        StatusCode::GONE
+    );
+    let reason: String =
+        sqlx::query_scalar("SELECT revoke_reason FROM urls WHERE short_code = 'blocked'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason, "original reason");
+    assert_eq!(
+        api_link(&app, Method::GET, "/api/v1/links/legacy", &key, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let created = api(app, Some(&key), "https://example.com/new").await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let body = json_body(created).await;
+    let token = body["edit_token"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("qke_")
+        .unwrap();
+    assert_eq!(
+        base64::prelude::BASE64_URL_SAFE_NO_PAD
+            .decode(token)
+            .unwrap()
+            .len(),
+        32
+    );
+    let owner: i64 =
+        sqlx::query_scalar("SELECT created_by_api_key_id FROM urls WHERE short_code = ?")
+            .bind(body["short_code"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owner, id);
+    db::check(path.to_str().unwrap()).await.unwrap();
+    pool.close().await;
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_script() {
+    let state = state().await;
+    let app = build_router(state.clone());
+    let (cookie, csrf, html) = form_page(request(app.clone(), "/").await).await;
+    assert!(html.contains("Report abuse:"));
+    let created = form_post(
+        &app,
+        "/",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[
+            ("url", "https://example.com/created"),
+            ("password", "fixture password"),
+        ],
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
+    let html = html_body(created).await;
+    let token = html
+        .split_once("id=\"edit-token\">")
+        .unwrap()
+        .1
+        .split('<')
+        .next()
+        .unwrap();
+    assert!(token.starts_with("qke_"));
+    assert!(html.contains("src=\"/static/qrcode.min.js\""));
+    let code: String = sqlx::query_scalar("SELECT short_code FROM urls WHERE edit_token_hash = ?")
+        .bind(db::hash_key(token))
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let url = format!("/{code}");
+    let protected = html_body(request(app.clone(), &url).await).await;
+    assert!(!protected.contains(token));
+    assert!(protected.contains("Report abuse:"));
+    db::revoke_link(&state.db, &code, "abuse").await.unwrap();
+    let revoked = html_body(request(app, &url).await).await;
+    assert!(!revoked.contains(token));
+    assert!(revoked.contains("Report abuse:"));
+}
