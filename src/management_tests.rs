@@ -187,6 +187,7 @@ async fn challenge_is_not_consumed_when_link_insert_fails() {
         || "a".repeat(21),
         Some(verify_altcha(&state.altcha_secret, &payload).unwrap()),
         None,
+        None,
     )
     .await;
     assert!(result.is_err());
@@ -434,6 +435,7 @@ async fn expired_links_return_410_without_location() {
             ..Default::default()
         },
         None,
+        None,
     )
     .await
     .ok()
@@ -453,6 +455,7 @@ async fn concurrent_gets_share_a_quota_and_head_does_not_spend_it() {
             max_visits: Some(2),
             ..Default::default()
         },
+        None,
         None,
     )
     .await
@@ -595,6 +598,7 @@ async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect(
             ..Default::default()
         },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -668,6 +672,7 @@ async fn password_attempts_are_limited_per_link() {
             ..Default::default()
         },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -730,6 +735,7 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
             expires_at: Some(Utc::now().timestamp() - 60),
             ..Default::default()
         },
+        None,
         None,
     )
     .await
@@ -882,4 +888,349 @@ async fn edit_token_guesses_are_rate_limited() {
             }
         );
     }
+}
+
+async fn api_link(
+    app: &Router,
+    method: Method,
+    path: &str,
+    key: &str,
+    body: Option<serde_json::Value>,
+) -> Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("X-API-Key", key);
+    let body = if let Some(body) = body {
+        request = request.header(header::CONTENT_TYPE, "application/json");
+        Body::from(body.to_string())
+    } else {
+        Body::empty()
+    };
+    app.clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn json_body(response: Response) -> serde_json::Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_valid() {
+    use serde_json::json;
+
+    let state = state().await;
+    let (id, key) = db::create_key(&state.db, "owner").await.unwrap();
+    let (_, other) = db::create_key(&state.db, "other").await.unwrap();
+    let anonymous = shorten_url(state.clone(), "https://example.com/anonymous".into())
+        .await
+        .unwrap();
+    let app = build_router(state.clone());
+
+    let response = api_link(&app, Method::POST, "/api/v1/shorten", &key,
+        Some(json!({"url": "https://example.com/original", "password": "API fixture 3k!", "max_visits": 2,
+                    "expires_at": Utc::now().timestamp() + 3600}))).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let created = json_body(response).await;
+    let code = created["short_code"].as_str().unwrap();
+    let edit_token = created["edit_token"].as_str().unwrap();
+    let expected_owner: i64 =
+        sqlx::query_scalar("SELECT created_by_api_key_id FROM urls WHERE short_code = ?")
+            .bind(code)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(expected_owner, id);
+
+    let path = format!("/api/v1/links/{code}");
+    let public_path = format!("/{code}");
+    let owned = json_body(api_link(&app, Method::GET, &path, &key, None).await).await;
+    assert_eq!(owned["has_password"], true);
+    assert_eq!(owned["max_visits"], 2);
+    assert!(owned["expires_at"].is_i64());
+    assert!(owned["updated_at"].is_string());
+    assert!(owned.get("edit_token").is_none());
+    assert!(owned.get("password_hash").is_none());
+    assert!(owned.get("created_by_api_key_id").is_none());
+    assert_eq!(
+        api_link(&app, Method::GET, &path, &other, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &other,
+            Some(json!({"max_visits": 1}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let anonymous_path = format!("/api/v1/links/{}", anonymous.short_code);
+    assert_eq!(
+        api_link(&app, Method::GET, &anonymous_path, &key, None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &anonymous_path,
+            &key,
+            Some(json!({"max_visits": 1}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"created_by_api_key_id": 2}))
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    for payload in [
+        json!({"url": null}),
+        json!({"url": "https://qkgo.de./self"}),
+        json!({"url": "javascript:alert(1)"}),
+        json!({"max_visits": 0}),
+        json!({"password": "short"}),
+        json!({"expires_at": i64::MAX}),
+    ] {
+        assert_eq!(
+            api_link(&app, Method::PATCH, &path, &key, Some(payload))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let patched = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"url": "https://example.com/new", "expires_at": 1})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(patched["original_url"], "https://example.com/new");
+    assert_eq!(patched["expires_at"], 1);
+    assert_eq!(patched["has_password"], true);
+    assert_eq!(patched["max_visits"], 2);
+    assert_eq!(
+        request(app.clone(), &public_path).await.status(),
+        StatusCode::GONE
+    );
+
+    let cleared = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"password": null, "expires_at": null, "max_visits": 1})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(cleared["has_password"], false);
+    assert!(cleared["expires_at"].is_null());
+    let redirect = request(app.clone(), &public_path).await;
+    assert_eq!(redirect.status(), StatusCode::FOUND);
+    assert_eq!(
+        redirect.headers()[header::LOCATION],
+        "https://example.com/new"
+    );
+    assert_eq!(
+        request(app.clone(), &public_path).await.status(),
+        StatusCode::GONE
+    );
+
+    let raised = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"max_visits": 2})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(raised["visit_count"], 1);
+    assert_eq!(
+        request(app.clone(), &public_path).await.status(),
+        StatusCode::FOUND
+    );
+    assert_eq!(
+        request(app.clone(), &public_path).await.status(),
+        StatusCode::GONE
+    );
+    let unlimited = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"max_visits": null})),
+        )
+        .await,
+    )
+    .await;
+    assert!(unlimited["max_visits"].is_null());
+    assert_eq!(unlimited["visit_count"], 2);
+    for _ in 0..2 {
+        assert_eq!(
+            request(app.clone(), &public_path).await.status(),
+            StatusCode::FOUND
+        );
+    }
+    let capped = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"max_visits": 2})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(capped["visit_count"], 2);
+    assert_eq!(
+        request(app.clone(), &public_path).await.status(),
+        StatusCode::GONE
+    );
+
+    db::revoke_key(&state.db, id).await.unwrap();
+    assert_eq!(
+        api_link(&app, Method::GET, &path, &key, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            &key,
+            Some(json!({"max_visits": 3}))
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (cookie, csrf, _) = form_page(request(app.clone(), "/edit").await).await;
+    let edit = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &fresh_solution(&state),
+        &[
+            ("action", "save"),
+            ("short_code", code),
+            ("edit_token", edit_token),
+            ("max_visits", "3"),
+        ],
+    )
+    .await;
+    assert_eq!(edit.status(), StatusCode::OK);
+    assert_eq!(request(app, &public_path).await.status(), StatusCode::FOUND);
+}
+
+#[tokio::test]
+async fn api_rate_limit_is_shared_across_endpoints_for_each_key() {
+    let state = state().await;
+    let (_, key) = db::create_key(&state.db, "limited").await.unwrap();
+    let (_, other) = db::create_key(&state.db, "other").await.unwrap();
+    let app = build_router(state);
+    for _ in 0..120 {
+        assert_eq!(
+            api_link(&app, Method::GET, "/api/v1/links/missing", &key, None)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        api(app.clone(), Some(&key), "https://example.com")
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        api(app, Some(&other), "https://example.com").await.status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn a_committing_admin_revocation_wins_over_a_waiting_patch() {
+    let path = std::env::temp_dir().join(format!("quickgo-race-{}.db", rand::random::<u64>()));
+    let pool = db::setup(path.to_str().unwrap()).await.unwrap();
+    let state = AppState {
+        db: pool.clone(),
+        ..state().await
+    };
+    let (_, key) = db::create_key(&pool, "owner").await.unwrap();
+    let app = build_router(state);
+    let created = json_body(api(app.clone(), Some(&key), "https://example.com/before").await).await;
+    let code = created["short_code"].as_str().unwrap();
+    let edit_path = format!("/api/v1/links/{code}");
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE urls SET revoked_at = CURRENT_TIMESTAMP WHERE short_code = ?")
+        .bind(code)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let patch = api_link(
+        &app,
+        Method::PATCH,
+        &edit_path,
+        &key,
+        Some(serde_json::json!({"url": "https://example.com/after"})),
+    );
+    tokio::pin!(patch);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut patch)
+            .await
+            .is_err()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(patch.await.status(), StatusCode::GONE);
+    assert_eq!(
+        api_link(&app, Method::GET, &edit_path, &key, None)
+            .await
+            .status(),
+        StatusCode::GONE
+    );
+    let url: String = sqlx::query_scalar("SELECT original_url FROM urls WHERE short_code = ?")
+        .bind(code)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(url, "https://example.com/before");
+    pool.close().await;
+    std::fs::remove_file(path).unwrap();
 }

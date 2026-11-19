@@ -7,9 +7,9 @@ use altcha_lib_rs::ChallengeOptions;
 use anyhow::Result;
 use askama::Template;
 use axum::{
-    Form, Json, Router,
+    Extension, Form, Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -89,6 +89,8 @@ struct Security {
     password_attempts: security::RateLimit<String>,
     edit_attempts: security::RateLimit<Option<IpAddr>>,
     password_work: security::PasswordWork,
+    api_auth_attempts: security::RateLimit<Option<IpAddr>>,
+    api_requests: security::RateLimit<i64>,
 }
 
 impl Default for Security {
@@ -97,6 +99,8 @@ impl Default for Security {
             password_attempts: security::RateLimit::new(120, 10),
             edit_attempts: security::RateLimit::new(300, 30),
             password_work: security::PasswordWork::default(),
+            api_auth_attempts: security::RateLimit::new(2_400, 600),
+            api_requests: security::RateLimit::new(2_400, 120),
         }
     }
 }
@@ -131,11 +135,31 @@ impl IntoResponse for HtmlError {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ApiKeyId(i64);
+
+fn invalid_api_key() -> (StatusCode, ErrorResponse) {
+    api_error(StatusCode::UNAUTHORIZED, "Missing or invalid API key")
+}
+
+fn json_error((status, error): (StatusCode, ErrorResponse)) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(error))
+}
+
 async fn validate_api_key(
     State(state): State<AppState>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    state
+        .security
+        .api_auth_attempts
+        .check(peer)
+        .map_err(json_error)?;
     let api_key = req
         .headers()
         .get("X-API-Key")
@@ -147,26 +171,19 @@ async fn validate_api_key(
                 .and_then(|v| v.strip_prefix("Bearer "))
         });
 
-    let valid = match api_key {
-        Some(key) => db::key_is_active(&state.db, key).await.map_err(|error| {
-            tracing::error!("API key lookup failed: {}", error);
-            (
+    let api_key = api_key.ok_or_else(|| json_error(invalid_api_key()))?;
+    let id = db::active_key_id(&state.db, api_key)
+        .await
+        .map_err(|error| {
+            tracing::error!("API key lookup failed: {error}");
+            json_error(api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Authentication unavailable".into(),
-                }),
-            )
-        })?,
-        None => false,
-    };
-    if !valid {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "Missing or invalid API key".into(),
-            }),
-        ));
-    }
+                "Authentication unavailable",
+            ))
+        })?
+        .ok_or_else(|| json_error(invalid_api_key()))?;
+    state.security.api_requests.check(id).map_err(json_error)?;
+    req.extensions_mut().insert(ApiKeyId(id));
     Ok(next.run(req).await)
 }
 
@@ -247,6 +264,10 @@ fn build_router(app_state: AppState) -> Router {
 
     let api_routes = Router::new()
         .route("/api/v1/shorten", post(create_url))
+        .route(
+            "/api/v1/links/{code}",
+            get(manage::get_link).patch(manage::patch_link),
+        )
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
             validate_api_key,
@@ -258,11 +279,11 @@ fn build_router(app_state: AppState) -> Router {
         .layer(
             ServiceBuilder::new()
                 .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
-                .layer(
-                    CorsLayer::new()
-                        .allow_headers(Any)
-                        .allow_methods([Method::GET, Method::POST]),
-                )
+                .layer(CorsLayer::new().allow_headers(Any).allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PATCH,
+                ]))
                 .layer(CsrfLayer::new(CsrfConfig::default())),
         )
         .with_state(app_state)
@@ -413,9 +434,10 @@ async fn api_docs(State(app_state): State<AppState>) -> Result<Html<String>, Htm
 
 async fn create_url(
     State(app_state): State<AppState>,
+    Extension(key): Extension<ApiKeyId>,
     Json(payload): Json<CreateUrlRequest>,
 ) -> Result<(StatusCode, Json<UrlResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let result = create_link(&app_state, payload, None).await;
+    let result = create_link(&app_state, payload, None, Some(key)).await;
     match result {
         Ok(response) => {
             tracing::info!("Created short URL: {}", response.short_code);
@@ -448,6 +470,7 @@ async fn create_url_form(
             password: (!payload.password.is_empty()).then_some(payload.password),
         },
         Some(challenge),
+        None,
     )
     .await;
     match result {
@@ -502,6 +525,7 @@ async fn shorten_url_with_challenge(
             ..Default::default()
         },
         challenge,
+        None,
     )
     .await
 }
@@ -558,6 +582,7 @@ async fn create_link(
     app_state: &AppState,
     mut payload: CreateUrlRequest,
     mut challenge: Option<VerifiedChallenge>,
+    owner: Option<ApiKeyId>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
     payload.url = normalize_destination(&payload.url, &app_state.base_url)?;
     validate_expiration(payload.expires_at)?;
@@ -577,6 +602,7 @@ async fn create_link(
         generate_short_code,
         challenge,
         password_hash,
+        owner,
     )
     .await
 }
@@ -634,6 +660,7 @@ async fn store_url_with_generator(
         &mut generate,
         None,
         None,
+        None,
     )
     .await
 }
@@ -661,7 +688,9 @@ async fn store_url(
     mut generate: impl FnMut() -> String,
     challenge: Option<VerifiedChallenge>,
     password_hash: Option<String>,
+    owner: Option<ApiKeyId>,
 ) -> Result<UrlResponse, (StatusCode, ErrorResponse)> {
+    let owner_id = owner.map(|key| key.0);
     let mut tx = app_state.db.begin().await.map_err(database_error)?;
     if let Some(challenge) = challenge {
         consume_challenge(&mut tx, challenge).await?;
@@ -676,7 +705,9 @@ async fn store_url(
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create link")
         })?;
         match sqlx::query(
-            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits, password_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            "INSERT INTO urls (short_code, original_url, edit_token_hash, expires_at, max_visits, password_hash, updated_at, created_by_api_key_id)
+             SELECT ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?
+             WHERE ? IS NULL OR EXISTS (SELECT 1 FROM api_keys WHERE id = ? AND revoked_at IS NULL)",
         )
         .bind(&short_code)
         .bind(&payload.url)
@@ -684,10 +715,13 @@ async fn store_url(
         .bind(payload.expires_at)
         .bind(payload.max_visits)
         .bind(&password_hash)
+        .bind(owner_id)
+        .bind(owner_id)
+        .bind(owner_id)
         .execute(&mut *tx)
         .await
         {
-            Ok(_) => {
+            Ok(result) if result.rows_affected() == 1 => {
                 tx.commit().await.map_err(database_error)?;
                 return Ok(UrlResponse {
                     original_url: payload.url,
@@ -696,6 +730,7 @@ async fn store_url(
                     edit_token,
                 });
             }
+            Ok(_) => return Err(invalid_api_key()),
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
             Err(error) => return Err(database_error(error)),
         }

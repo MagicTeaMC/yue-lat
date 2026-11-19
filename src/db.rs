@@ -67,16 +67,15 @@ pub async fn create_key(db: &SqlitePool, name: &str) -> Result<(i64, String)> {
     Ok((result.last_insert_rowid(), key))
 }
 
-pub async fn key_is_active(db: &SqlitePool, key: &str) -> Result<bool> {
+pub async fn active_key_id(db: &SqlitePool, key: &str) -> Result<Option<i64>> {
     if key.len() > 256 {
-        return Ok(false);
+        return Ok(None);
     }
     Ok(
-        sqlx::query("SELECT 1 FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL")
+        sqlx::query_scalar("SELECT id FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL")
             .bind(hash_key(key))
             .fetch_optional(db)
-            .await?
-            .is_some(),
+            .await?,
     )
 }
 

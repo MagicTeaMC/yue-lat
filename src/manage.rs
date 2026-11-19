@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::{
-    Extension, Form,
-    extract::{ConnectInfo, State},
+    Extension, Form, Json,
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -13,15 +13,16 @@ use sqlx::{QueryBuilder, Sqlite};
 use std::net::SocketAddr;
 
 use crate::{
-    AppState, ErrorResponse, FormSecurity, HtmlError, api_error, database_error, db,
-    normalize_destination, parse_form_expiration, parse_form_max_visits, render_html,
-    validate_expiration, validate_max_visits, verify_sensitive_form,
+    ApiKeyId, AppState, ErrorResponse, FormSecurity, HtmlError, api_error, database_error, db,
+    invalid_api_key, json_error, normalize_destination, parse_form_expiration,
+    parse_form_max_visits, render_html, validate_expiration, validate_max_visits,
+    verify_sensitive_form,
 };
 
 type ManagementError = (StatusCode, ErrorResponse);
 
 #[derive(sqlx::FromRow, Serialize)]
-struct LinkInfo {
+pub struct LinkInfo {
     short_code: String,
     original_url: String,
     expires_at: Option<i64>,
@@ -59,12 +60,45 @@ impl EditTokenHash {
             short_code: None,
         })
     }
+}
 
+enum LinkAccess {
+    Token(EditTokenHash),
+    ApiKey { code: String, id: ApiKeyId },
+}
+
+impl LinkAccess {
     fn push_filter(&self, query: &mut QueryBuilder<Sqlite>) {
-        query.push("edit_token_hash = ").push_bind(&self.hash);
-        if let Some(code) = &self.short_code {
-            query.push(" AND short_code = ").push_bind(code);
+        match self {
+            Self::Token(token) => {
+                query.push("edit_token_hash = ").push_bind(&token.hash);
+                if let Some(code) = &token.short_code {
+                    query.push(" AND short_code = ").push_bind(code);
+                }
+            }
+            Self::ApiKey { code, id } => {
+                query.push("short_code = ").push_bind(code);
+                query.push(" AND created_by_api_key_id = ").push_bind(id.0);
+                query.push(" AND EXISTS (SELECT 1 FROM api_keys WHERE id = created_by_api_key_id AND revoked_at IS NULL)");
+            }
         }
+    }
+
+    async fn missing(&self, app: &AppState) -> ManagementError {
+        if let Self::ApiKey { id, .. } = self {
+            let active = sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM api_keys WHERE id = ? AND revoked_at IS NULL",
+            )
+            .bind(id.0)
+            .fetch_optional(&app.db)
+            .await;
+            match active {
+                Ok(None) => return invalid_api_key(),
+                Err(error) => return database_error(error),
+                Ok(Some(_)) => {}
+            }
+        }
+        managed_link_not_found()
     }
 }
 
@@ -72,16 +106,18 @@ fn managed_link_not_found() -> ManagementError {
     api_error(StatusCode::NOT_FOUND, "No link found for these credentials")
 }
 
-async fn find_link(app: &AppState, access: &EditTokenHash) -> Result<LinkInfo, ManagementError> {
+async fn find_link(app: &AppState, access: &LinkAccess) -> Result<LinkInfo, ManagementError> {
     let mut query = QueryBuilder::new("SELECT ");
     query.push(INFO_COLUMNS).push(" FROM urls WHERE ");
     access.push_filter(&mut query);
-    let info: LinkInfo = query
+    let info: Option<LinkInfo> = query
         .build_query_as()
         .fetch_optional(&app.db)
         .await
-        .map_err(database_error)?
-        .ok_or_else(managed_link_not_found)?;
+        .map_err(database_error)?;
+    let Some(info) = info else {
+        return Err(access.missing(app).await);
+    };
     if info.revoked {
         return Err(api_error(
             StatusCode::GONE,
@@ -101,7 +137,7 @@ struct EditSettings {
 
 async fn update_link(
     app: &AppState,
-    access: &EditTokenHash,
+    access: &LinkAccess,
     settings: EditSettings,
 ) -> Result<LinkInfo, ManagementError> {
     let current = find_link(app, access).await?;
@@ -244,7 +280,7 @@ pub async fn submit_edit(
     let mut access = EditTokenHash::parse(&form.edit_token)?;
     match form.action {
         EditAction::Lookup => {
-            let link = find_link(&app, &access).await?;
+            let link = find_link(&app, &LinkAccess::Token(access)).await?;
             edit_page(&app, token, Some(link), false)
         }
         EditAction::Save => {
@@ -272,8 +308,70 @@ pub async fn submit_edit(
                     PasswordAction::Remove => Some(None),
                 },
             };
-            let link = update_link(&app, &access, settings).await?;
+            let link = update_link(&app, &LinkAccess::Token(access), settings).await?;
             edit_page(&app, token, Some(link), true)
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchLink {
+    #[serde(default, deserialize_with = "present")]
+    url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    expires_at: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present")]
+    max_visits: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present")]
+    password: Option<Option<String>>,
+}
+
+// Serde uses the default for an omitted field. A present JSON null is an explicit clear.
+fn present<'de, D, T>(value: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(value).map(Some)
+}
+
+pub async fn get_link(
+    State(app): State<AppState>,
+    Extension(id): Extension<ApiKeyId>,
+    Path(code): Path<String>,
+) -> Result<Json<LinkInfo>, (StatusCode, Json<ErrorResponse>)> {
+    find_link(&app, &LinkAccess::ApiKey { code, id })
+        .await
+        .map(Json)
+        .map_err(json_error)
+}
+
+pub async fn patch_link(
+    State(app): State<AppState>,
+    Extension(id): Extension<ApiKeyId>,
+    Path(code): Path<String>,
+    Json(patch): Json<PatchLink>,
+) -> Result<Json<LinkInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let url = patch
+        .url
+        .map(|value| {
+            value.ok_or_else(|| {
+                json_error(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "Destination cannot be null",
+                ))
+            })
+        })
+        .transpose()?;
+    let settings = EditSettings {
+        url,
+        expires_at: patch.expires_at,
+        max_visits: patch.max_visits,
+        password: patch.password,
+    };
+    update_link(&app, &LinkAccess::ApiKey { code, id }, settings)
+        .await
+        .map(Json)
+        .map_err(json_error)
 }
