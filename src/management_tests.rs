@@ -781,6 +781,7 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
     );
     let (cookie, csrf, html) = form_page(found).await;
     assert!(html.contains("https://example.com/old"));
+    assert!(html.contains("type=\"datetime-local\" name=\"expires_at\""));
     assert!(!html.contains(&link.edit_token));
     assert!(!html.contains(&hash));
 
@@ -1317,6 +1318,7 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let app = build_router(state.clone());
     let (cookie, csrf, html) = form_page(request(app.clone(), "/").await).await;
     assert!(html.contains("Report abuse:"));
+    assert!(html.contains("type=\"datetime-local\" name=\"expires_at\""));
     let created = form_post(
         &app,
         "/",
@@ -1326,6 +1328,7 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
         &[
             ("url", "https://example.com/created"),
             ("password", "fixture password"),
+            ("expires_at", "2030-06-15T12:00"),
         ],
     )
     .await;

@@ -531,17 +531,23 @@ async fn shorten_url_with_challenge(
 }
 
 fn parse_form_expiration(input: &str) -> Result<Option<i64>, (StatusCode, ErrorResponse)> {
-    if input.trim().is_empty() {
+    let input = input.trim();
+    if input.is_empty() {
         return Ok(None);
     }
-    chrono::DateTime::parse_from_rfc3339(input.trim())
-        .map(|date| Some(date.timestamp()))
-        .map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "Enter an expiration with a time zone, e.g. 2030-06-15T12:00:00Z",
-            )
-        })
+    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(input) {
+        return Ok(Some(date.timestamp()));
+    }
+    // The native picker submits UTC without a suffix when the conversion script is unavailable.
+    for format in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(date) = chrono::NaiveDateTime::parse_from_str(input, format) {
+            return Ok(Some(date.and_utc().timestamp()));
+        }
+    }
+    Err(api_error(
+        StatusCode::BAD_REQUEST,
+        "Choose a valid expiration date and time.",
+    ))
 }
 
 fn validate_expiration(expires_at: Option<i64>) -> Result<(), (StatusCode, ErrorResponse)> {
@@ -1173,6 +1179,22 @@ mod tests {
             altcha_secret: "test-secret".into(),
             security: Default::default(),
         }
+    }
+
+    #[test]
+    fn expiration_forms_accept_picker_values_and_preserve_utc_seconds() {
+        let expected = chrono::DateTime::parse_from_rfc3339("2030-06-15T12:00:00Z")
+            .unwrap()
+            .timestamp();
+        for input in [
+            "2030-06-15T12:00",
+            "2030-06-15T12:00:00",
+            "2030-06-15T20:00:00+08:00",
+        ] {
+            assert_eq!(parse_form_expiration(input).unwrap(), Some(expected));
+        }
+        assert_eq!(parse_form_expiration("").unwrap(), None);
+        assert!(parse_form_expiration("2030-02-30T12:00").is_err());
     }
 
     #[test]
