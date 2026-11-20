@@ -823,12 +823,26 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
         StatusCode::FORBIDDEN
     );
     let saved = form_post(&app, "/edit", &cookie, &csrf, &save_proof, &save).await;
-    assert_eq!(saved.status(), StatusCode::OK);
-    let (_, _, html) = form_page(saved).await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let location = saved.headers()[header::LOCATION].to_str().unwrap();
+    assert_eq!(location, "/edit?saved=1");
+    let confirmation = request(app.clone(), location).await;
+    assert!(html_body(saved).await.is_empty());
+    assert_eq!(confirmation.status(), StatusCode::OK);
+    assert_eq!(confirmation.headers()[header::CACHE_CONTROL], "no-store");
+    let (_, _, html) = form_page(confirmation).await;
     assert!(html.contains("Link settings saved."));
-    assert!(html.contains("https://example.com/new"));
-    assert!(!html.contains(&link.edit_token));
-    assert!(!html.contains("鶴"));
+    assert!(html.contains("name=\"action\" value=\"lookup\""));
+    for private in [
+        "https://example.com/new",
+        &link.short_code,
+        &link.edit_token,
+        "鶴",
+        "name=\"short_code\"",
+        "name=\"max_visits\"",
+    ] {
+        assert!(!html.contains(private));
+    }
     let response = request(app.clone(), &format!("/{}", link.short_code)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(html_body(response).await.contains("Password required"));
@@ -1176,7 +1190,7 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
         ],
     )
     .await;
-    assert_eq!(edit.status(), StatusCode::OK);
+    assert_eq!(edit.status(), StatusCode::SEE_OTHER);
     assert_eq!(request(app, &public_path).await.status(), StatusCode::FOUND);
 }
 
@@ -1490,8 +1504,19 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
         ],
     )
     .await;
-    assert_eq!(save.status(), StatusCode::OK);
-    let (_, _, html) = form_page(save).await;
+    assert_eq!(save.status(), StatusCode::SEE_OTHER);
+    let (cookie, csrf, html) = form_page(request(app.clone(), "/edit").await).await;
+    let lookup = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[("action", "lookup"), ("edit_token", token)],
+    )
+    .await;
+    assert_eq!(lookup.status(), StatusCode::OK);
+    let (_, _, html) = form_page(lookup).await;
     assert!(html.contains("This link is paused."));
     assert!(!html.contains("style=\"width:auto\" checked"));
     assert!(
@@ -1585,7 +1610,7 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
         ],
     )
     .await;
-    assert_eq!(resumed.status(), StatusCode::OK);
+    assert_eq!(resumed.status(), StatusCode::SEE_OTHER);
     let (cookie, csrf, html) = form_page(request(app.clone(), &path).await).await;
     let unlocked = form_post(
         &app,

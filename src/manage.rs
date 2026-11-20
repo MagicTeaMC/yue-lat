@@ -1,9 +1,9 @@
 use askama::Template;
 use axum::{
     Extension, Form, Json,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_csrf::CsrfToken;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
@@ -249,11 +249,17 @@ fn edit_page(
     Ok((token, render_html(template)?).into_response())
 }
 
+#[derive(Deserialize)]
+pub struct EditQuery {
+    saved: Option<String>,
+}
+
 pub async fn edit_form(
     token: CsrfToken,
     State(app): State<AppState>,
+    Query(query): Query<EditQuery>,
 ) -> Result<Response, HtmlError> {
-    edit_page(&app, token, None, false)
+    edit_page(&app, token, None, query.saved.as_deref() == Some("1"))
 }
 
 #[derive(Deserialize)]
@@ -333,8 +339,8 @@ pub async fn submit_edit(
                     PasswordAction::Remove => Some(None),
                 },
             };
-            let link = update_link(&app, &access, current, settings).await?;
-            edit_page(&app, token, Some(link), true)
+            update_link(&app, &access, current, settings).await?;
+            Ok(Redirect::to("/edit?saved=1").into_response())
         }
     }
 }
