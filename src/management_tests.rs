@@ -1505,7 +1505,15 @@ async fn public_pages_use_consistent_titles_and_about_explains_abuse_reporting()
     ] {
         let html = html_body(request(app.clone(), path).await).await;
         assert!(html.contains(&format!("<title>{title}</title>")));
+        if path == "/" {
+            assert!(html.contains(concat!(
+                "By using QuickGo, you agree to the <a href=\"/about#terms-of-service\">Terms of Service</a>",
+                " and acknowledge the <a href=\"/about#privacy-policy\">Privacy Policy</a>."
+            )));
+        }
         if path == "/about" {
+            assert!(html.contains("<h2 id=\"privacy-policy\">Privacy Policy</h2>"));
+            assert!(html.contains("<h2 id=\"terms-of-service\">Terms of Service</h2>"));
             assert!(html.contains("<h2>Report abuse</h2>"));
             assert!(html.contains("https://maoyue.tw/#contact"));
             assert!(html.contains("include the short link"));

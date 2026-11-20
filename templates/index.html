@@ -8,6 +8,8 @@
     .link-options > summary { color: #e7f2ff; font-size: 1rem; font-weight: 650; cursor: pointer; }
     .link-option-fields { margin-top: 0.875rem; }
     .link-option-fields label { display: block; color: #b9c5d3; font-size: 0.875rem; }
+    .terms-notice { margin: 0.625rem 0 0; color: #a8b4c2; font-size: 0.75rem; }
+    .terms-notice a { color: #7b9fc2; text-decoration: underline; }
 </style>
 {% endblock %}
 {% block nav_home %}aria-current="page"{% endblock %}
@@ -29,7 +31,8 @@
         </div>
     </details>
     {% include "form_security.html" %}
-    <button type="submit" id="submit-btn" disabled>Shorten</button>
+    <button type="submit" id="submit-btn" aria-describedby="terms-notice" disabled>Shorten</button>
+    <p id="terms-notice" class="terms-notice">By using QuickGo, you agree to the <a href="/about#terms-of-service">Terms of Service</a> and acknowledge the <a href="/about#privacy-policy">Privacy Policy</a>.</p>
 </form>
 <script>
     document.addEventListener('DOMContentLoaded', function() {
