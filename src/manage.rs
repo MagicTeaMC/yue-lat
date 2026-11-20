@@ -54,7 +54,7 @@ impl EditTokenHash {
                     .is_ok_and(|bytes| bytes.len() == 32)
         });
         if !valid {
-            return Err(managed_link_not_found());
+            return Err(edit_token_not_found());
         }
         Ok(Self {
             hash: db::hash_key(token),
@@ -99,12 +99,17 @@ impl LinkAccess {
                 Ok(Some(_)) => {}
             }
         }
-        managed_link_not_found()
+        match self {
+            Self::Token(_) => edit_token_not_found(),
+            Self::ApiKey { .. } => {
+                api_error(StatusCode::NOT_FOUND, "No link found for these credentials")
+            }
+        }
     }
 }
 
-fn managed_link_not_found() -> ManagementError {
-    api_error(StatusCode::NOT_FOUND, "No link found for these credentials")
+fn edit_token_not_found() -> ManagementError {
+    api_error(StatusCode::NOT_FOUND, "Unable to manage this link.")
 }
 
 async fn find_link(app: &AppState, access: &LinkAccess) -> Result<LinkInfo, ManagementError> {
@@ -122,7 +127,7 @@ async fn find_link(app: &AppState, access: &LinkAccess) -> Result<LinkInfo, Mana
     if info.revoked {
         return Err(api_error(
             StatusCode::GONE,
-            "This link has been permanently revoked",
+            "This link has been permanently revoked.",
         ));
     }
     Ok(info)
@@ -140,9 +145,9 @@ struct EditSettings {
 async fn update_link(
     app: &AppState,
     access: &LinkAccess,
+    current: LinkInfo,
     settings: EditSettings,
 ) -> Result<LinkInfo, ManagementError> {
-    let current = find_link(app, access).await?;
     if settings.url.is_none()
         && settings.expires_at.is_none()
         && settings.max_visits.is_none()
@@ -306,12 +311,9 @@ pub async fn submit_edit(
             edit_page(&app, token, Some(link), false)
         }
         EditAction::Save => {
-            access.short_code = Some(form.short_code.ok_or_else(|| {
-                api_error(
-                    StatusCode::BAD_REQUEST,
-                    "Look up the link before saving changes",
-                )
-            })?);
+            access.short_code = Some(form.short_code.ok_or_else(edit_token_not_found)?);
+            let access = LinkAccess::Token(access);
+            let current = find_link(&app, &access).await?;
             let settings = EditSettings {
                 url: form.url,
                 expires_at: form
@@ -331,7 +333,7 @@ pub async fn submit_edit(
                     PasswordAction::Remove => Some(None),
                 },
             };
-            let link = update_link(&app, &LinkAccess::Token(access), settings).await?;
+            let link = update_link(&app, &access, current, settings).await?;
             edit_page(&app, token, Some(link), true)
         }
     }
@@ -385,6 +387,8 @@ pub async fn patch_link(
     Path(code): Path<String>,
     Json(patch): Json<PatchLink>,
 ) -> Result<Json<LinkInfo>, (StatusCode, Json<ErrorResponse>)> {
+    let access = LinkAccess::ApiKey { code, id };
+    let current = find_link(&app, &access).await.map_err(json_error)?;
     let url = patch
         .url
         .map(|value| {
@@ -403,7 +407,7 @@ pub async fn patch_link(
         password: patch.password,
         paused: patch.paused,
     };
-    update_link(&app, &LinkAccess::ApiKey { code, id }, settings)
+    update_link(&app, &access, current, settings)
         .await
         .map(Json)
         .map_err(json_error)

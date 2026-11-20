@@ -9,7 +9,7 @@ use askama::Template;
 use axum::{
     Extension, Form, Json, Router,
     body::Body,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State, rejection::FormRejection},
     http::{Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -359,16 +359,6 @@ fn validate_url_length(url: &str) -> Result<(), String> {
         return Err(format!(
             "URL too long. Maximum length is {} characters",
             MAX_URL_LENGTH
-        ));
-    }
-    Ok(())
-}
-
-fn validate_short_code_length(short_code: &str) -> Result<(), String> {
-    if short_code.len() > MAX_SHORT_CODE_LENGTH {
-        return Err(format!(
-            "Short code too long. Maximum length is {} characters",
-            MAX_SHORT_CODE_LENGTH
         ));
     }
     Ok(())
@@ -844,7 +834,7 @@ async fn redirect_url(
             return Ok(response);
         }
     }
-    Err(link_changed())
+    Err(link_unavailable())
 }
 
 #[derive(Deserialize)]
@@ -860,17 +850,21 @@ async fn verify_link_password(
     token: CsrfToken,
     Path(short_code): Path<String>,
     State(app): State<AppState>,
-    Form(form): Form<PasswordForm>,
+    form: Result<Form<PasswordForm>, FormRejection>,
 ) -> Result<Response, HtmlError> {
     validate_redirect_code(&short_code)?;
-    verify_sensitive_form(&app, &token, &form.authenticity_token, &form.altcha).await?;
     let target = redirect_target(&app.db, &short_code).await?;
     if let Some(response) = target.unavailable()? {
         return Ok(response);
     }
     let Some(password_hash) = target.password_hash else {
-        return Err(link_changed());
+        return Err(link_unavailable());
     };
+    let Form(form) = match form {
+        Ok(form) => form,
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+    verify_sensitive_form(&app, &token, &form.authenticity_token, &form.altcha).await?;
     app.security.password_attempts.check(short_code.clone())?;
     if !app
         .security
@@ -887,20 +881,20 @@ async fn verify_link_password(
             return Ok(response);
         }
         if target.password_hash.as_deref() != Some(&password_hash) {
-            return Err(link_changed());
+            return Err(link_unavailable());
         }
         let response = target.redirect(StatusCode::SEE_OTHER)?;
         if target.max_visits.is_none() || target.consume_visit(&app.db, &short_code).await? {
             return Ok(response);
         }
     }
-    Err(link_changed())
+    Err(link_unavailable())
 }
 
-fn link_changed() -> HtmlError {
+fn link_unavailable() -> HtmlError {
     HtmlError {
-        status: StatusCode::CONFLICT,
-        message: "The link changed. Please try again.".into(),
+        status: StatusCode::NOT_FOUND,
+        message: "This link is unavailable.".into(),
     }
 }
 
@@ -934,24 +928,12 @@ fn render_html(template: impl Template) -> Result<Html<String>, HtmlError> {
 }
 
 fn validate_redirect_code(short_code: &str) -> Result<(), HtmlError> {
-    if is_reserved(short_code) {
-        return Err(HtmlError {
-            status: StatusCode::NOT_FOUND,
-            message: "Page not found".into(),
-        });
-    }
-    if let Err(error) = validate_short_code_length(short_code) {
-        tracing::warn!("Short code validation failed in redirect: {}", error);
-        return Err(HtmlError {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid short code format.".to_string(),
-        });
-    }
-    if short_code.is_empty() || !short_code.bytes().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(HtmlError {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid short code format.".to_string(),
-        });
+    if is_reserved(short_code)
+        || short_code.is_empty()
+        || short_code.len() > MAX_SHORT_CODE_LENGTH
+        || !short_code.bytes().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(link_unavailable());
     }
     Ok(())
 }
@@ -976,12 +958,7 @@ async fn redirect_target(db: &SqlitePool, short_code: &str) -> Result<RedirectTa
     .fetch_optional(db)
     .await
     .map_err(database_error)?
-    .ok_or_else(|| HtmlError {
-        status: StatusCode::NOT_FOUND,
-        message: format!(
-            "Short URL '{short_code}' not found. It may have been mistyped or doesn't exist."
-        ),
-    })
+    .ok_or_else(link_unavailable)
 }
 
 impl RedirectTarget {
@@ -993,22 +970,15 @@ impl RedirectTarget {
             })?;
             return Ok(Some((StatusCode::GONE, Html(html)).into_response()));
         }
-        let message = if self.paused {
-            "This link is paused."
-        } else if self
-            .expires_at
-            .is_some_and(|expiry| expiry <= Utc::now().timestamp())
+        if self.paused
+            || self
+                .expires_at
+                .is_some_and(|expiry| expiry <= Utc::now().timestamp())
+            || self.max_visits.is_some_and(|max| self.visit_count >= max)
         {
-            "This link has expired."
-        } else if self.max_visits.is_some_and(|max| self.visit_count >= max) {
-            "This link has reached its maximum number of uses."
-        } else {
-            return Ok(None);
-        };
-        Err(HtmlError {
-            status: StatusCode::GONE,
-            message: message.into(),
-        })
+            return Err(link_unavailable());
+        }
+        Ok(None)
     }
 
     fn redirect(&self, status: StatusCode) -> Result<Response, HtmlError> {

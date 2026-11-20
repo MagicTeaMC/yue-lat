@@ -127,7 +127,7 @@ async fn revoked_link_has_html_410_no_location_and_no_cache() {
             .to_vec(),
     )
     .unwrap();
-    assert!(body.contains("This link has been revoked"));
+    assert!(body.contains("This link has been permanently revoked."));
     assert!(!body.contains("private abuse details"));
     assert!(!body.contains("https://example.com/private"));
     assert!(db::revoke_link(&state.db, "missing", "test").await.is_err());
@@ -425,7 +425,7 @@ async fn form_checks_csrf_and_captcha_and_sets_no_store() {
 }
 
 #[tokio::test]
-async fn expired_links_return_410_without_location() {
+async fn expired_links_return_404_without_location() {
     let state = state().await;
     let link = create_link(
         &state,
@@ -441,7 +441,7 @@ async fn expired_links_return_410_without_location() {
     .ok()
     .unwrap();
     let response = request(build_router(state), &format!("/{}", link.short_code)).await;
-    assert_eq!(response.status(), StatusCode::GONE);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(!response.headers().contains_key(header::LOCATION));
 }
 
@@ -487,7 +487,7 @@ async fn concurrent_gets_share_a_quota_and_head_does_not_spend_it() {
         if response.status() == StatusCode::FOUND {
             redirects += 1;
         } else {
-            assert_eq!(response.status(), StatusCode::GONE);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
             assert!(!response.headers().contains_key(header::LOCATION));
         }
     }
@@ -658,7 +658,7 @@ async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect(
         "https://example.com/private"
     );
     assert!(!response.headers().contains_key(header::SET_COOKIE));
-    assert_eq!(request(app, &path).await.status(), StatusCode::GONE);
+    assert_eq!(request(app, &path).await.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1059,7 +1059,7 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     assert_eq!(patched["max_visits"], 2);
     assert_eq!(
         request(app.clone(), &public_path).await.status(),
-        StatusCode::GONE
+        StatusCode::NOT_FOUND
     );
 
     let cleared = json_body(
@@ -1083,7 +1083,7 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     );
     assert_eq!(
         request(app.clone(), &public_path).await.status(),
-        StatusCode::GONE
+        StatusCode::NOT_FOUND
     );
 
     let raised = json_body(
@@ -1104,7 +1104,7 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     );
     assert_eq!(
         request(app.clone(), &public_path).await.status(),
-        StatusCode::GONE
+        StatusCode::NOT_FOUND
     );
     let unlimited = json_body(
         api_link(
@@ -1139,7 +1139,7 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     assert_eq!(capped["visit_count"], 2);
     assert_eq!(
         request(app.clone(), &public_path).await.status(),
-        StatusCode::GONE
+        StatusCode::NOT_FOUND
     );
 
     db::revoke_key(&state.db, id).await.unwrap();
@@ -1278,7 +1278,7 @@ async fn migration_from_v01_keeps_keys_revocations_and_existing_links() {
     let legacy_matches: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM urls WHERE short_code = 'legacy' AND edit_token_hash IS NULL
          AND created_by_api_key_id IS NULL AND expires_at IS NULL AND password_hash IS NULL
-         AND max_visits IS NULL AND visit_count = 0 AND updated_at IS NULL",
+         AND max_visits IS NULL AND visit_count = 0 AND updated_at IS NULL AND paused = 0",
     )
     .fetch_one(&pool)
     .await
@@ -1502,7 +1502,10 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
             .unwrap()
     );
 
-    assert_eq!(request(app.clone(), &path).await.status(), StatusCode::GONE);
+    assert_eq!(
+        request(app.clone(), &path).await.status(),
+        StatusCode::NOT_FOUND
+    );
     let head = app
         .clone()
         .oneshot(
@@ -1514,7 +1517,7 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
         )
         .await
         .unwrap();
-    assert_eq!(head.status(), StatusCode::GONE);
+    assert_eq!(head.status(), StatusCode::NOT_FOUND);
     let stale = form_post(
         &app,
         &path,
@@ -1524,7 +1527,7 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
         &[("password", "x")],
     )
     .await;
-    assert_eq!(stale.status(), StatusCode::GONE);
+    assert_eq!(stale.status(), StatusCode::NOT_FOUND);
     assert!(!stale.headers().contains_key(header::LOCATION));
 
     assert_eq!(
@@ -1621,4 +1624,117 @@ async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
         .status(),
         StatusCode::GONE
     );
+}
+
+#[tokio::test]
+async fn public_unavailability_has_identical_responses_without_leaking_state() {
+    let state = state().await;
+    sqlx::query(
+        "INSERT INTO urls (short_code, original_url, paused, expires_at, max_visits, visit_count, revoked_at)
+         VALUES ('Paused', 'https://example.com/secret', 1, NULL, NULL, 0, NULL),
+                ('Expired', 'https://example.com/secret', 0, 1, NULL, 0, NULL),
+                ('Spent', 'https://example.com/secret', 0, NULL, 1, 1, NULL),
+                ('Revoked', 'https://example.com/secret', 1, 1, 1, 1, CURRENT_TIMESTAMP)",
+    ).execute(&state.db).await.unwrap();
+    let app = build_router(state);
+    for method in [Method::GET, Method::HEAD, Method::POST] {
+        let mut expected = None;
+        for path in ["/missing", "/Paused", "/Expired", "/Spent", "/bad-code"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let headers = response.headers().clone();
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+            assert!(
+                !headers.contains_key(header::LOCATION)
+                    && !headers.contains_key(header::SET_COOKIE)
+            );
+            let body = html_body(response).await;
+            if method == Method::HEAD {
+                assert!(body.is_empty());
+            } else {
+                assert!(body.contains("This link is unavailable."));
+                assert!(!body.contains("example.com/secret"));
+            }
+            if let Some(expected) = &expected {
+                assert_eq!(&(headers, body), expected);
+            } else {
+                expected = Some((headers, body));
+            }
+        }
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri("/Revoked")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::GONE);
+        assert!(!revoked.headers().contains_key(header::LOCATION));
+    }
+}
+
+#[tokio::test]
+async fn failed_edit_token_checks_are_indistinguishable_even_with_invalid_settings() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com/secret".into(),
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap_or_else(|(status, _)| panic!("create returned {status}"));
+    let app = build_router(state);
+    let unissued = db::generate_secret("qke_").unwrap();
+    let mut expected = None;
+    for fields in [
+        vec![("action", "lookup"), ("edit_token", "invalid")],
+        vec![("action", "lookup"), ("edit_token", unissued.as_str())],
+        vec![
+            ("action", "save"),
+            ("edit_token", link.edit_token.as_str()),
+            ("short_code", "WRONG"),
+            ("expires_at", "invalid"),
+        ],
+        vec![
+            ("action", "save"),
+            ("edit_token", unissued.as_str()),
+            ("short_code", link.short_code.as_str()),
+            ("expires_at", "invalid"),
+        ],
+    ] {
+        let (cookie, csrf, html) = form_page(request(app.clone(), "/edit").await).await;
+        let response = form_post(&app, "/edit", &cookie, &csrf, &solve_form(&html), &fields).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let headers = response.headers().clone();
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert!(
+            !headers.contains_key(header::LOCATION) && !headers.contains_key(header::SET_COOKIE)
+        );
+        let body = html_body(response).await;
+        assert!(body.contains("Unable to manage this link."));
+        assert!(!body.contains("example.com/secret"));
+        if let Some(expected) = &expected {
+            assert_eq!(&(headers, body), expected);
+        } else {
+            expected = Some((headers, body));
+        }
+    }
 }
