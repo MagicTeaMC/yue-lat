@@ -41,11 +41,14 @@ X-API-Key: your-api-key-here</pre>
     <h4>Request Body</h4>
     <div class="result">
         <pre style="margin: 0; white-space: pre-wrap;">{
-  "url": "https://example.com/very/long/url"
+  "url": "https://example.com/very/long/url",
+  "expires_at": 1907755200,
+  "password": "example passphrase",
+  "max_visits": 10
 }</pre>
     </div>
 
-    <p>Optional fields include <code>expires_at</code> (UTC Unix seconds), <code>password</code> (8 characters minimum, 128 bytes maximum), <code>max_visits</code> (positive integer).</p>
+    <p>Only <code>url</code> is required. Optional fields include <code>expires_at</code> (UTC Unix seconds), <code>password</code> (8 characters minimum, 128 bytes maximum), <code>max_visits</code> (positive integer).</p>
     <h4>Success Response (201 Created)</h4>
     <div class="result">
         <pre style="margin: 0; white-space: pre-wrap;">{
@@ -164,7 +167,7 @@ X-API-Key: your-api-key-here</pre>
         <pre style="margin: 0; white-space: pre-wrap;">curl -X POST {{ base_url }}/api/v1/shorten \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"url": "https://example.com/very/long/url"}'</pre>
+  -d '{"url":"https://example.com/very/long/url","expires_at":1907755200,"password":"example passphrase","max_visits":10}'</pre>
     </div>
 </div>
 
