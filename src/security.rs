@@ -72,7 +72,7 @@ impl Default for PasswordWork {
 }
 
 pub fn valid_password(password: &str) -> bool {
-    password.len() <= 128 && password.chars().count() >= 8
+    !password.is_empty() && password.len() <= 128
 }
 
 impl PasswordWork {
@@ -107,7 +107,11 @@ impl PasswordWork {
         if !valid_password(&password) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                "Password must be at least 8 characters and at most 128 bytes",
+                if password.is_empty() {
+                    "Enter a password."
+                } else {
+                    "Password is too long."
+                },
             ));
         }
         self.run(move || {
@@ -163,10 +167,10 @@ mod tests {
     }
 
     #[test]
-    fn password_limits_count_characters_and_bytes() {
+    fn accepts_short_nonempty_passwords_up_to_byte_limit() {
         assert!(valid_password(&"🚀".repeat(32)));
         assert!(!valid_password(&"🚀".repeat(33)));
-        assert!(!valid_password(&"🚀".repeat(7)));
-        assert!(valid_password("aaaaaaaa"));
+        assert!(valid_password("🚀"));
+        assert!(!valid_password(""));
     }
 }

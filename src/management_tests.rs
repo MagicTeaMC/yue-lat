@@ -594,7 +594,7 @@ async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect(
         CreateUrlRequest {
             url: "https://example.com/private".into(),
             max_visits: Some(1),
-            password: Some("密碼 éü! xyz".into()),
+            password: Some("密".into()),
             ..Default::default()
         },
         None,
@@ -608,13 +608,13 @@ async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect(
         .await
         .unwrap();
     assert!(hash.starts_with("$argon2id$"));
-    assert!(!hash.contains("密碼"));
+    assert!(!hash.contains("密"));
     assert_ne!(
         hash,
         state
             .security
             .password_work
-            .hash("密碼 éü! xyz".into())
+            .hash("密".into())
             .await
             .unwrap()
     );
@@ -627,7 +627,7 @@ async fn password_page_requires_csrf_and_fresh_captcha_then_issues_one_redirect(
     let (cookie, csrf, html) = form_page(page).await;
     assert!(!html.contains("https://example.com/private"));
     let proof = solve_form(&html);
-    let correct = [("password", "密碼 éü! xyz")];
+    let correct = [("password", "密")];
     let wrong = [("password", "wrong password")];
     assert_eq!(
         form_post(&app, &path, &cookie, "wrong", &proof, &correct)
@@ -793,7 +793,7 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
         ("expires_at", ""),
         ("max_visits", "3"),
         ("password_action", "set"),
-        ("password", "fixture 8Zy!X"),
+        ("password", "鶴"),
     ];
     assert_eq!(
         form_post(&app, "/edit", &cookie, &csrf, &proof, &save)
@@ -828,7 +828,7 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
     assert!(html.contains("Link settings saved."));
     assert!(html.contains("https://example.com/new"));
     assert!(!html.contains(&link.edit_token));
-    assert!(!html.contains("fixture 8Zy!X"));
+    assert!(!html.contains("鶴"));
     let response = request(app.clone(), &format!("/{}", link.short_code)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(html_body(response).await.contains("Password required"));
@@ -930,9 +930,17 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
         .unwrap();
     let app = build_router(state.clone());
 
-    let response = api_link(&app, Method::POST, "/api/v1/shorten", &key,
-        Some(json!({"url": "https://example.com/original", "password": "API fixture 3k!", "max_visits": 2,
-                    "expires_at": Utc::now().timestamp() + 3600}))).await;
+    let response = api_link(
+        &app,
+        Method::POST,
+        "/api/v1/shorten",
+        &key,
+        Some(
+            json!({"url": "https://example.com/original", "password": "x", "max_visits": 2,
+                    "expires_at": Utc::now().timestamp() + 3600}),
+        ),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let created = json_body(response).await;
@@ -1023,7 +1031,8 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
         json!({"url": "https://qkgo.de./self"}),
         json!({"url": "javascript:alert(1)"}),
         json!({"max_visits": 0}),
-        json!({"password": "short"}),
+        json!({"password": ""}),
+        json!({"password": "🚀".repeat(33)}),
         json!({"expires_at": i64::MAX}),
     ] {
         assert_eq!(
@@ -1339,7 +1348,7 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
         &solve_form(&html),
         &[
             ("url", "https://example.com/created"),
-            ("password", "fixture password"),
+            ("password", "x"),
             ("expires_at", "2030-06-15T12:00"),
         ],
     )
