@@ -3,6 +3,12 @@
 <link rel="canonical" href="{{ base_url }}/">
 <meta property="og:url" content="{{ base_url }}/">
 <meta property="twitter:url" content="{{ base_url }}/">
+<style>
+    .link-options { margin-top: 0.5rem; }
+    .link-options > summary { color: #e7f2ff; font-size: 1rem; font-weight: 650; cursor: pointer; }
+    .link-option-fields { margin-top: 0.875rem; }
+    .link-option-fields label { display: block; color: #b9c5d3; font-size: 0.875rem; }
+</style>
 {% endblock %}
 {% block nav_home %}aria-current="page"{% endblock %}
 {% block content %}
@@ -11,14 +17,16 @@
 <script defer src="/static/expiration.js"></script>
 <form method="post" id="shorten-form">
     <input type="url" name="url" placeholder="https://example.com/very/long/url" required>
-    <details>
+    <details class="link-options">
         <summary>Link options</summary>
-        <label for="expires-at">Expiration (optional, <span id="expiration-zone">UTC</span>)</label>
-        <input id="expires-at" type="datetime-local" name="expires_at" step="1">
-        <label for="max-visits">Maximum uses (optional)</label>
-        <input id="max-visits" type="number" name="max_visits" min="1" step="1">
-        <label for="password">Visitor password (optional)</label>
-        <input id="password" type="password" name="password" autocomplete="off">
+        <div class="link-option-fields">
+            <label for="expires-at">Expiration (optional, <span id="expiration-zone">UTC</span>)</label>
+            <input id="expires-at" type="datetime-local" name="expires_at" step="1">
+            <label for="max-visits">Maximum uses (optional)</label>
+            <input id="max-visits" type="number" name="max_visits" min="1" step="1">
+            <label for="password">Visitor password (optional)</label>
+            <input id="password" type="password" name="password" autocomplete="off">
+        </div>
     </details>
     {% include "form_security.html" %}
     <button type="submit" id="submit-btn" disabled>Shorten</button>
