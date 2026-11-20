@@ -4,16 +4,17 @@
 <meta property="og:url" content="{{ base_url }}/">
 <meta property="twitter:url" content="{{ base_url }}/">
 {% endblock %}
-{% block footer_notice %}{% include "report_abuse.html" %}{% endblock %}
+{% block nav_home %}aria-current="page"{% endblock %}
 {% block content %}
 <h1>QuickGo</h1>
 <script type="module" src="/static/altcha.min.js"></script>
+<script defer src="/static/expiration.js"></script>
 <form method="post" id="shorten-form">
     <input type="url" name="url" placeholder="https://example.com/very/long/url" required>
     <details>
         <summary>Link options</summary>
-        <label for="expires-at">Expiration (optional, include time zone)</label>
-        <input id="expires-at" name="expires_at" placeholder="2030-06-15T12:00:00Z">
+        <label for="expires-at">Expiration (optional, <span id="expiration-zone">UTC</span>)</label>
+        <input id="expires-at" type="datetime-local" name="expires_at" step="1">
         <label for="max-visits">Maximum uses (optional)</label>
         <input id="max-visits" type="number" name="max_visits" min="1" step="1">
         <label for="password">Visitor password (optional, 8 characters minimum, 128 bytes maximum)</label>
@@ -22,7 +23,6 @@
     {% include "form_security.html" %}
     <button type="submit" id="submit-btn" disabled>Shorten</button>
 </form>
-<p><a href="/edit">Manage a link</a></p>
 <script>
     document.addEventListener('DOMContentLoaded', function() {
         const submitBtn = document.getElementById('submit-btn');

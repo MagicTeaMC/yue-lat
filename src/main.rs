@@ -46,6 +46,10 @@ struct ApiDocsTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "about.html")]
+struct AboutTemplate {}
+
+#[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
     base_url: String,
@@ -254,6 +258,7 @@ fn build_router(app_state: AppState) -> Router {
     let public_routes = Router::new()
         .route("/", get(root).post(create_url_form))
         .route("/api/v1", get(api_docs))
+        .route("/about", get(about))
         .route("/edit", get(manage::edit_form).post(manage::submit_edit))
         .route("/favicon.ico", get(favicon))
         .route(
@@ -416,6 +421,10 @@ async fn root(
     }
 }
 
+async fn about() -> Result<Html<String>, HtmlError> {
+    render_html(AboutTemplate {})
+}
+
 async fn api_docs(State(app_state): State<AppState>) -> Result<Html<String>, HtmlError> {
     let template = ApiDocsTemplate {
         base_url: app_state.base_url,
@@ -531,17 +540,23 @@ async fn shorten_url_with_challenge(
 }
 
 fn parse_form_expiration(input: &str) -> Result<Option<i64>, (StatusCode, ErrorResponse)> {
-    if input.trim().is_empty() {
+    let input = input.trim();
+    if input.is_empty() {
         return Ok(None);
     }
-    chrono::DateTime::parse_from_rfc3339(input.trim())
-        .map(|date| Some(date.timestamp()))
-        .map_err(|_| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "Enter an expiration with a time zone, e.g. 2030-06-15T12:00:00Z",
-            )
-        })
+    if let Ok(date) = chrono::DateTime::parse_from_rfc3339(input) {
+        return Ok(Some(date.timestamp()));
+    }
+    // The native picker submits UTC without a suffix when the conversion script is unavailable.
+    for format in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(date) = chrono::NaiveDateTime::parse_from_str(input, format) {
+            return Ok(Some(date.and_utc().timestamp()));
+        }
+    }
+    Err(api_error(
+        StatusCode::BAD_REQUEST,
+        "Choose a valid expiration date and time.",
+    ))
 }
 
 fn validate_expiration(expires_at: Option<i64>) -> Result<(), (StatusCode, ErrorResponse)> {
@@ -1173,6 +1188,22 @@ mod tests {
             altcha_secret: "test-secret".into(),
             security: Default::default(),
         }
+    }
+
+    #[test]
+    fn expiration_forms_accept_picker_values_and_preserve_utc_seconds() {
+        let expected = chrono::DateTime::parse_from_rfc3339("2030-06-15T12:00:00Z")
+            .unwrap()
+            .timestamp();
+        for input in [
+            "2030-06-15T12:00",
+            "2030-06-15T12:00:00",
+            "2030-06-15T20:00:00+08:00",
+        ] {
+            assert_eq!(parse_form_expiration(input).unwrap(), Some(expected));
+        }
+        assert_eq!(parse_form_expiration("").unwrap(), None);
+        assert!(parse_form_expiration("2030-02-30T12:00").is_err());
     }
 
     #[test]

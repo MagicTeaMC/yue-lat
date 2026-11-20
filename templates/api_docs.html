@@ -8,11 +8,8 @@
 {% block title %}API Documentation - QuickGo{% endblock %}
 {% block description %}API documentation for our service. Learn how to integrate and use the API.{% endblock %}
 
+{% block nav_docs %}aria-current="page"{% endblock %}
 {% block content %}
-<div style="margin-bottom: 2rem;">
-    <a href="/" style="color: #4da6ff; text-decoration: none;">← Back to Home</a>
-</div>
-
 <h1>API Documentation</h1>
 
 <div style="margin-bottom: 2rem;">
@@ -59,7 +56,7 @@ X-API-Key: your-api-key-here</pre>
 }</pre>
     </div>
 
-    <p>Save your Edit Token. It is shown once.</p>
+    <p>The response includes an Edit Token once, for consistency with web-created links. It is only for <a href="/edit">/edit</a>.</p>
 
     <h4>Error Responses</h4>
     <div class="result">
@@ -115,11 +112,48 @@ X-API-Key: your-api-key-here</pre>
     </div>
 </div>
 
-<h3>GET /api/v1/links/{code}<br>PATCH /api/v1/links/{code}</h3>
+<h3>GET /api/v1/links/{code}</h3>
+<p>Read a link using the API key that created it.</p>
+<h4>Request</h4>
+<div class="result">
+    <pre style="margin: 0; white-space: pre-wrap;">curl {{ base_url }}/api/v1/links/AC3X79 \
+  -H "X-API-Key: your-api-key-here"</pre>
+</div>
+<h4>Response (200 OK)</h4>
+<div class="result">
+    <pre style="margin: 0; white-space: pre-wrap;">{
+  "short_code": "AC3X79",
+  "original_url": "https://example.com/very/long/url",
+  "expires_at": 1907755200,
+  "has_password": false,
+  "max_visits": 10,
+  "visit_count": 2,
+  "updated_at": "2030-02-01 12:00:00"
+}</pre>
+</div>
+
+<h3>PATCH /api/v1/links/{code}</h3>
 <p>Use the API key that created the link. PATCH accepts <code>url</code> and the optional fields above.
    Omit fields to keep them. Use <code>null</code> to clear restrictions.</p>
-<p>Both return <code>short_code</code>, <code>original_url</code>, <code>expires_at</code>, <code>has_password</code>,
-   <code>max_visits</code>, <code>visit_count</code>, and <code>updated_at</code>.</p>
+<h4>Request</h4>
+<div class="result">
+    <pre style="margin: 0; white-space: pre-wrap;">curl -X PATCH {{ base_url }}/api/v1/links/AC3X79 \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key-here" \
+  -d '{"url": "https://example.com/new", "expires_at": null}'</pre>
+</div>
+<h4>Response (200 OK)</h4>
+<div class="result">
+    <pre style="margin: 0; white-space: pre-wrap;">{
+  "short_code": "AC3X79",
+  "original_url": "https://example.com/new",
+  "expires_at": null,
+  "has_password": false,
+  "max_visits": 10,
+  "visit_count": 2,
+  "updated_at": "2030-02-01 12:05:00"
+}</pre>
+</div>
 <p><code>404</code> means missing or unowned. <code>410</code> means revoked.</p>
 
 <h2>Example Usage</h2>

@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 {% block robots %}noindex, nofollow{% endblock %}
-{% block title %}Manage a link · QuickGo{% endblock %}
+{% block title %}Manage a Link - QuickGo{% endblock %}
+{% block nav_edit %}aria-current="page"{% endblock %}
 {% block content %}
 <h1>Manage a link</h1>
 {% if saved %}
 <p role="status">Link settings saved.</p>
 {% endif %}
 <script type="module" src="/static/altcha.min.js"></script>
+{% if link.is_some() %}<script defer src="/static/expiration.js"></script>{% endif %}
 <form method="post" action="/edit" autocomplete="off">
     {% if let Some(info) = link %}
     <p>Short code: <code>{{ info.short_code }}</code> · Counted uses: {{ info.visit_count }}</p>
@@ -14,8 +16,8 @@
     <input type="hidden" name="short_code" value="{{ info.short_code }}">
     <label for="url">Destination URL</label>
     <input id="url" name="url" type="url" value="{{ info.original_url }}" required>
-    <label for="expires-at">Expiration (include time zone, leave blank to remove)</label>
-    <input id="expires-at" name="expires_at" value="{{ expiration }}" placeholder="2030-06-15T12:00:00Z">
+    <label for="expires-at">Expiration (<span id="expiration-zone">UTC</span>, leave blank to remove)</label>
+    <input id="expires-at" type="datetime-local" name="expires_at" step="1" value="{{ expiration }}">
     <label for="max-visits">Maximum uses (leave blank for unlimited)</label>
     <input id="max-visits" name="max_visits" type="number" min="1" step="1" value="{{ max_visits }}">
     <p>

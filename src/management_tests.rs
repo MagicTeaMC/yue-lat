@@ -247,10 +247,10 @@ async fn reserved_paths_cannot_be_allocated_or_resolved_as_short_links() {
     .await
     .unwrap();
     let app = build_router(state);
-    assert_eq!(
-        request(app.clone(), "/about").await.status(),
-        StatusCode::NOT_FOUND
-    );
+    let about = request(app.clone(), "/about").await;
+    assert_eq!(about.status(), StatusCode::OK);
+    assert!(!about.headers().contains_key(header::LOCATION));
+    assert!(html_body(about).await.contains("<h1>About</h1>"));
     assert_eq!(
         request(app.clone(), "/api/v1").await.status(),
         StatusCode::OK
@@ -781,6 +781,7 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
     );
     let (cookie, csrf, html) = form_page(found).await;
     assert!(html.contains("https://example.com/old"));
+    assert!(html.contains("type=\"datetime-local\" name=\"expires_at\""));
     assert!(!html.contains(&link.edit_token));
     assert!(!html.contains(&hash));
 
@@ -946,6 +947,18 @@ async fn api_key_ownership_is_private_and_revoking_a_key_leaves_the_edit_token_v
     assert_eq!(expected_owner, id);
 
     let path = format!("/api/v1/links/{code}");
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &path,
+            edit_token,
+            Some(json!({"max_visits": 1}))
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
     let public_path = format!("/{code}");
     let owned = json_body(api_link(&app, Method::GET, &path, &key, None).await).await;
     assert_eq!(owned["has_password"], true);
@@ -1316,7 +1329,8 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let state = state().await;
     let app = build_router(state.clone());
     let (cookie, csrf, html) = form_page(request(app.clone(), "/").await).await;
-    assert!(html.contains("Report abuse:"));
+    assert!(!html.contains("Report abuse"));
+    assert!(html.contains("type=\"datetime-local\" name=\"expires_at\""));
     let created = form_post(
         &app,
         "/",
@@ -1326,19 +1340,25 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
         &[
             ("url", "https://example.com/created"),
             ("password", "fixture password"),
+            ("expires_at", "2030-06-15T12:00"),
         ],
     )
     .await;
     assert_eq!(created.status(), StatusCode::OK);
     assert_eq!(created.headers()[header::CACHE_CONTROL], "no-store");
     let html = html_body(created).await;
-    let token = html
-        .split_once("id=\"edit-token\">")
+    assert!(html.contains("<title>URL Shortened - QuickGo</title>"));
+    assert!(html.contains("<details class=\"success-disclosure\" id=\"qr-details\">"));
+    assert!(html.contains("<details class=\"success-disclosure\" id=\"token-details\">"));
+    let token_field = html
+        .split_once("id=\"edit-token\"")
         .unwrap()
         .1
-        .split('<')
+        .split('>')
         .next()
         .unwrap();
+    assert!(token_field.contains("type=\"password\" readonly"));
+    let token = input_value(token_field, "value=\"");
     assert!(token.starts_with("qke_"));
     assert!(html.contains("src=\"/static/qrcode.min.js\""));
     let code: String = sqlx::query_scalar("SELECT short_code FROM urls WHERE edit_token_hash = ?")
@@ -1349,9 +1369,68 @@ async fn browser_creation_shows_token_only_on_success_and_keeps_the_local_qr_scr
     let url = format!("/{code}");
     let protected = html_body(request(app.clone(), &url).await).await;
     assert!(!protected.contains(token));
-    assert!(protected.contains("Report abuse:"));
+    assert!(!protected.contains("Report abuse"));
+    assert!(protected.contains("<title>Password Required - QuickGo</title>"));
     db::revoke_link(&state.db, &code, "abuse").await.unwrap();
     let revoked = html_body(request(app, &url).await).await;
     assert!(!revoked.contains(token));
-    assert!(revoked.contains("Report abuse:"));
+    assert!(!revoked.contains("Report abuse"));
+    assert!(revoked.contains("<title>Link Revoked - QuickGo</title>"));
+}
+
+#[tokio::test]
+async fn url_punctuation_is_stored_as_data_and_edits_stay_on_the_selected_link() {
+    let state = state().await;
+    let (_, key) = db::create_key(&state.db, "O'Brien; QA").await.unwrap();
+    let app = build_router(state);
+    let other = json_body(api(app.clone(), Some(&key), "https://example.com/other").await).await;
+    let created =
+        json_body(api(app.clone(), Some(&key), "https://example.com/O'Brien;guide").await).await;
+    assert_eq!(created["original_url"], "https://example.com/O'Brien;guide");
+
+    let code = created["short_code"].as_str().unwrap();
+    let other_code = other["short_code"].as_str().unwrap();
+    let destination = "https://example.com/l'été;2026";
+    let response = api_link(
+        &app,
+        Method::PATCH,
+        &format!("/api/v1/links/{code}"),
+        &key,
+        Some(serde_json::json!({"url": destination})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = json_body(response).await;
+    assert_eq!(
+        result["original_url"],
+        Url::parse(destination).unwrap().as_str()
+    );
+    let redirect = request(app, &format!("/{other_code}")).await;
+    assert_eq!(redirect.status(), StatusCode::FOUND);
+    assert_eq!(
+        redirect.headers()[header::LOCATION],
+        "https://example.com/other"
+    );
+}
+
+#[tokio::test]
+async fn public_pages_use_consistent_titles_and_about_explains_abuse_reporting() {
+    let app = build_router(state().await);
+    for (path, title) in [
+        ("/", "QuickGo"),
+        ("/edit", "Manage a Link - QuickGo"),
+        ("/api/v1", "API Documentation - QuickGo"),
+        ("/about", "About - QuickGo"),
+        ("/missing", "Error - QuickGo"),
+    ] {
+        let html = html_body(request(app.clone(), path).await).await;
+        assert!(html.contains(&format!("<title>{title}</title>")));
+        if path == "/about" {
+            assert!(html.contains("<h2>Report abuse</h2>"));
+            assert!(html.contains("https://maoyue.tw/#contact"));
+            assert!(html.contains("include the short link"));
+        } else {
+            assert!(!html.contains("Report abuse"));
+        }
+    }
 }

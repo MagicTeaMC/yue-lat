@@ -7,7 +7,7 @@ use axum::{
 };
 use axum_csrf::CsrfToken;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::{DateTime, SecondsFormat};
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 use std::net::SocketAddr;
@@ -209,7 +209,7 @@ fn edit_page(
         .as_ref()
         .and_then(|info| info.expires_at)
         .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
-        .map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .map(|value| value.format("%Y-%m-%dT%H:%M:%S").to_string())
         .unwrap_or_default();
     let max_visits = link
         .as_ref()
