@@ -1443,3 +1443,182 @@ async fn public_pages_use_consistent_titles_and_about_explains_abuse_reporting()
         }
     }
 }
+
+#[tokio::test]
+async fn enabled_checkbox_and_api_pause_share_state_without_spending_visits() {
+    let state = state().await;
+    let (_, key) = db::create_key(&state.db, "pause owner").await.unwrap();
+    let (_, other) = db::create_key(&state.db, "other owner").await.unwrap();
+    let app = build_router(state.clone());
+    let created = api_link(
+        &app, Method::POST, "/api/v1/shorten", &key,
+        Some(serde_json::json!({"url": "https://example.com/paused-test", "password":"x", "max_visits":2})),
+    ).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = json_body(created).await;
+    let code = created["short_code"].as_str().unwrap();
+    let token = created["edit_token"].as_str().unwrap();
+    let path = format!("/{code}");
+    let api_path = format!("/api/v1/links/{code}");
+    let (visitor_cookie, visitor_csrf, visitor_html) =
+        form_page(request(app.clone(), &path).await).await;
+    let stale_target = redirect_target(&state.db, code).await.ok().unwrap();
+    let (cookie, csrf, html) = form_page(request(app.clone(), "/edit").await).await;
+    let lookup = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[("action", "lookup"), ("edit_token", token)],
+    )
+    .await;
+    let (cookie, csrf, html) = form_page(lookup).await;
+    assert!(html.contains("name=\"enabled\" value=\"true\" style=\"width:auto\" checked"));
+
+    let save = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[
+            ("action", "save"),
+            ("edit_token", token),
+            ("short_code", code),
+            ("update_enabled", "true"),
+        ],
+    )
+    .await;
+    assert_eq!(save.status(), StatusCode::OK);
+    let (_, _, html) = form_page(save).await;
+    assert!(html.contains("This link is paused."));
+    assert!(!html.contains("style=\"width:auto\" checked"));
+    assert!(
+        !stale_target
+            .consume_visit(&state.db, code)
+            .await
+            .ok()
+            .unwrap()
+    );
+
+    assert_eq!(request(app.clone(), &path).await.status(), StatusCode::GONE);
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(&path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::GONE);
+    let stale = form_post(
+        &app,
+        &path,
+        &visitor_cookie,
+        &visitor_csrf,
+        &solve_form(&visitor_html),
+        &[("password", "x")],
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::GONE);
+    assert!(!stale.headers().contains_key(header::LOCATION));
+
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &api_path,
+            &other,
+            Some(serde_json::json!({"paused": false}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &api_path,
+            &key,
+            Some(serde_json::json!({"paused": null}))
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let current = json_body(
+        api_link(
+            &app,
+            Method::PATCH,
+            &api_path,
+            &key,
+            Some(serde_json::json!({"max_visits": 3})),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(current["paused"], true);
+    assert_eq!(current["visit_count"], 0);
+    assert_eq!(current["has_password"], true);
+
+    let (cookie, csrf, html) = form_page(request(app.clone(), "/edit").await).await;
+    let resumed = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[
+            ("action", "save"),
+            ("edit_token", token),
+            ("short_code", code),
+            ("update_enabled", "true"),
+            ("enabled", "true"),
+        ],
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let (cookie, csrf, html) = form_page(request(app.clone(), &path).await).await;
+    let unlocked = form_post(
+        &app,
+        &path,
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[("password", "x")],
+    )
+    .await;
+    assert_eq!(unlocked.status(), StatusCode::SEE_OTHER);
+    let current = json_body(api_link(&app, Method::GET, &api_path, &key, None).await).await;
+    assert_eq!(current["paused"], false);
+    assert_eq!(current["visit_count"], 1);
+    assert_eq!(current["max_visits"], 3);
+    let paused = api_link(
+        &app,
+        Method::PATCH,
+        &api_path,
+        &key,
+        Some(serde_json::json!({"paused": true})),
+    )
+    .await;
+    assert_eq!(paused.status(), StatusCode::OK);
+    assert_eq!(json_body(paused).await["paused"], true);
+    db::revoke_link(&state.db, code, "test").await.unwrap();
+    assert_eq!(
+        api_link(
+            &app,
+            Method::PATCH,
+            &api_path,
+            &key,
+            Some(serde_json::json!({"paused": false}))
+        )
+        .await
+        .status(),
+        StatusCode::GONE
+    );
+}

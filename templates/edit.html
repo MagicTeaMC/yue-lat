@@ -14,6 +14,11 @@
     <p>Short code: <code>{{ info.short_code }}</code> · Counted uses: {{ info.visit_count }}</p>
     <input type="hidden" name="action" value="save">
     <input type="hidden" name="short_code" value="{{ info.short_code }}">
+    <input type="hidden" name="update_enabled" value="true">
+    <p><label><input type="checkbox" name="enabled" value="true" style="width:auto" {% if !info.paused %}checked{% endif %}> Enabled</label></p>
+    {% if info.paused %}<p>This link is paused.</p>{% endif %}
+    {% if expired %}<p>This link has expired.</p>{% endif %}
+    {% if exhausted %}<p>This link has reached its usage limit.</p>{% endif %}
     <label for="url">Destination URL</label>
     <input id="url" name="url" type="url" value="{{ info.original_url }}" required>
     <label for="expires-at">Expiration (<span id="expiration-zone">UTC</span>, leave blank to remove)</label>

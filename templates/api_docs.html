@@ -131,19 +131,20 @@ X-API-Key: your-api-key-here</pre>
   "has_password": false,
   "max_visits": 10,
   "visit_count": 2,
+  "paused": false,
   "updated_at": "2030-02-01 12:00:00"
 }</pre>
 </div>
 
 <h3>PATCH /api/v1/links/{code}</h3>
-<p>Use the API key that created the link. PATCH accepts <code>url</code> and the optional fields above.
-   Omit fields to keep them. Use <code>null</code> to clear restrictions.</p>
+<p>Use the API key that created the link. PATCH accepts <code>url</code>, <code>paused</code> (boolean) and the optional fields above.
+   Omit fields to keep them. Use <code>null</code> to clear <code>expires_at</code>, <code>password</code>, or <code>max_visits</code>.</p>
 <h4>Request</h4>
 <div class="result">
     <pre style="margin: 0; white-space: pre-wrap;">curl -X PATCH {{ base_url }}/api/v1/links/AC3X79 \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{"url": "https://example.com/new", "expires_at": null}'</pre>
+  -d '{"url": "https://example.com/new", "expires_at": null, "paused": true}'</pre>
 </div>
 <h4>Response (200 OK)</h4>
 <div class="result">
@@ -154,6 +155,7 @@ X-API-Key: your-api-key-here</pre>
   "has_password": false,
   "max_visits": 10,
   "visit_count": 2,
+  "paused": true,
   "updated_at": "2030-02-01 12:05:00"
 }</pre>
 </div>

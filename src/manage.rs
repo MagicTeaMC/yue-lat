@@ -7,7 +7,7 @@ use axum::{
 };
 use axum_csrf::CsrfToken;
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 use std::net::SocketAddr;
@@ -29,6 +29,7 @@ pub struct LinkInfo {
     has_password: bool,
     max_visits: Option<i64>,
     visit_count: i64,
+    paused: bool,
     updated_at: Option<String>,
     #[serde(skip)]
     revoked: bool,
@@ -36,7 +37,7 @@ pub struct LinkInfo {
 
 const INFO_COLUMNS: &str =
     "short_code, original_url, expires_at, password_hash IS NOT NULL AS has_password,
-    max_visits, visit_count, updated_at, revoked_at IS NOT NULL AS revoked";
+    max_visits, visit_count, paused, updated_at, revoked_at IS NOT NULL AS revoked";
 
 struct EditTokenHash {
     hash: String,
@@ -133,6 +134,7 @@ struct EditSettings {
     expires_at: Option<Option<i64>>,
     max_visits: Option<Option<i64>>,
     password: Option<Option<String>>,
+    paused: Option<bool>,
 }
 
 async fn update_link(
@@ -145,6 +147,7 @@ async fn update_link(
         && settings.expires_at.is_none()
         && settings.max_visits.is_none()
         && settings.password.is_none()
+        && settings.paused.is_none()
     {
         return Ok(current);
     }
@@ -174,6 +177,9 @@ async fn update_link(
         };
         query.push(", password_hash = ").push_bind(hash);
     }
+    if let Some(paused) = settings.paused {
+        query.push(", paused = ").push_bind(paused);
+    }
     // Recheck the credential and permanent revocation in the write itself.
     query.push(" WHERE revoked_at IS NULL AND ");
     access.push_filter(&mut query);
@@ -196,6 +202,8 @@ struct EditTemplate {
     link: Option<LinkInfo>,
     expiration: String,
     max_visits: String,
+    expired: bool,
+    exhausted: bool,
     saved: bool,
 }
 
@@ -216,11 +224,21 @@ fn edit_page(
         .and_then(|info| info.max_visits)
         .map(|value| value.to_string())
         .unwrap_or_default();
+    let expired = link
+        .as_ref()
+        .and_then(|info| info.expires_at)
+        .is_some_and(|expiry| expiry <= Utc::now().timestamp());
+    let exhausted = link.as_ref().is_some_and(|info| {
+        info.max_visits
+            .is_some_and(|maximum| info.visit_count >= maximum)
+    });
     let template = EditTemplate {
         security: FormSecurity::new(app, &token)?,
         link,
         expiration,
         max_visits,
+        expired,
+        exhausted,
         saved,
     };
     Ok((token, render_html(template)?).into_response())
@@ -262,6 +280,10 @@ pub struct EditForm {
     expires_at: Option<String>,
     max_visits: Option<String>,
     #[serde(default)]
+    update_enabled: bool,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
     password_action: PasswordAction,
     #[serde(default)]
     password: String,
@@ -302,6 +324,7 @@ pub async fn submit_edit(
                     .as_deref()
                     .map(parse_form_max_visits)
                     .transpose()?,
+                paused: form.update_enabled.then_some(!form.enabled),
                 password: match form.password_action {
                     PasswordAction::Keep => None,
                     PasswordAction::Set => Some(Some(form.password)),
@@ -325,6 +348,8 @@ pub struct PatchLink {
     max_visits: Option<Option<i64>>,
     #[serde(default, deserialize_with = "present")]
     password: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_bool")]
+    paused: Option<bool>,
 }
 
 // Serde uses the default for an omitted field. A present JSON null is an explicit clear.
@@ -334,6 +359,13 @@ where
     T: Deserialize<'de>,
 {
     Option::deserialize(value).map(Some)
+}
+
+fn present_bool<'de, D>(value: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(value).map(Some)
 }
 
 pub async fn get_link(
@@ -369,6 +401,7 @@ pub async fn patch_link(
         expires_at: patch.expires_at,
         max_visits: patch.max_visits,
         password: patch.password,
+        paused: patch.paused,
     };
     update_link(&app, &LinkAccess::ApiKey { code, id }, settings)
         .await

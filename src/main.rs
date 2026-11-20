@@ -964,11 +964,12 @@ struct RedirectTarget {
     max_visits: Option<i64>,
     visit_count: i64,
     password_hash: Option<String>,
+    paused: bool,
 }
 
 async fn redirect_target(db: &SqlitePool, short_code: &str) -> Result<RedirectTarget, HtmlError> {
     sqlx::query_as(
-        "SELECT original_url, revoked_at, expires_at, max_visits, visit_count, password_hash
+        "SELECT original_url, revoked_at, expires_at, max_visits, visit_count, password_hash, paused
          FROM urls WHERE short_code = ?",
     )
     .bind(short_code)
@@ -992,7 +993,9 @@ impl RedirectTarget {
             })?;
             return Ok(Some((StatusCode::GONE, Html(html)).into_response()));
         }
-        let message = if self
+        let message = if self.paused {
+            "This link is paused."
+        } else if self
             .expires_at
             .is_some_and(|expiry| expiry <= Utc::now().timestamp())
         {
@@ -1021,7 +1024,7 @@ impl RedirectTarget {
         // Count only redirects for the destination we are about to send.
         let result = sqlx::query(
             "UPDATE urls SET visit_count = visit_count + 1
-             WHERE short_code = ? AND original_url = ? AND password_hash IS ? AND revoked_at IS NULL
+             WHERE short_code = ? AND original_url = ? AND password_hash IS ? AND revoked_at IS NULL AND paused = 0
                AND (expires_at IS NULL OR expires_at > unixepoch())
                AND max_visits IS NOT NULL AND visit_count < max_visits",
         )
