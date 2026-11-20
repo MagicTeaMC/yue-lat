@@ -879,6 +879,63 @@ async fn edit_token_lookup_and_save_require_fresh_proofs_and_never_echo_the_toke
 }
 
 #[tokio::test]
+async fn manage_displays_counted_uses_only_with_a_limit() {
+    let state = state().await;
+    let link = create_link(
+        &state,
+        CreateUrlRequest {
+            url: "https://example.com".into(),
+            max_visits: Some(3),
+            ..Default::default()
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let app = build_router(state);
+
+    let lookup = || async {
+        let (cookie, csrf, html) = form_page(request(app.clone(), "/edit").await).await;
+        let response = form_post(
+            &app,
+            "/edit",
+            &cookie,
+            &csrf,
+            &solve_form(&html),
+            &[("action", "lookup"), ("edit_token", &link.edit_token)],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        form_page(response).await
+    };
+
+    assert!(lookup().await.2.contains(" · Counted uses: 0</p>"));
+    let visit = request(app.clone(), &format!("/{}", link.short_code)).await;
+    assert_eq!(visit.status(), StatusCode::FOUND);
+    let (cookie, csrf, html) = lookup().await;
+    assert!(html.contains(" · Counted uses: 1</p>"));
+    let saved = form_post(
+        &app,
+        "/edit",
+        &cookie,
+        &csrf,
+        &solve_form(&html),
+        &[
+            ("action", "save"),
+            ("short_code", &link.short_code),
+            ("edit_token", &link.edit_token),
+            ("max_visits", ""),
+        ],
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let (_, _, html) = lookup().await;
+    assert!(html.contains(&format!("Short code: <code>{}</code></p>", link.short_code)));
+    assert!(!html.contains("Counted uses"));
+}
+
+#[tokio::test]
 async fn edit_token_guesses_are_rate_limited() {
     let state = state().await;
     let app = build_router(state.clone());
