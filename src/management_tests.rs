@@ -910,11 +910,11 @@ async fn manage_displays_counted_uses_only_with_a_limit() {
         form_page(response).await
     };
 
-    assert!(lookup().await.2.contains(" · Counted uses: 0</p>"));
+    assert!(lookup().await.2.contains("</code><br>Counted uses: 0</p>"));
     let visit = request(app.clone(), &format!("/{}", link.short_code)).await;
     assert_eq!(visit.status(), StatusCode::FOUND);
     let (cookie, csrf, html) = lookup().await;
-    assert!(html.contains(" · Counted uses: 1</p>"));
+    assert!(html.contains("</code><br>Counted uses: 1</p>"));
     let saved = form_post(
         &app,
         "/edit",

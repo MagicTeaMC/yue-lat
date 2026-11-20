@@ -11,7 +11,7 @@
 {% if link.is_some() %}<script defer src="/static/expiration.js"></script>{% endif %}
 <form method="post" action="/edit" autocomplete="off">
     {% if let Some(info) = link %}
-    <p>Short code: <code>{{ info.short_code }}</code>{% if info.max_visits.is_some() %} · Counted uses: {{ info.visit_count }}{% endif %}</p>
+    <p>Short code: <code>{{ info.short_code }}</code>{% if info.max_visits.is_some() %}<br>Counted uses: {{ info.visit_count }}{% endif %}</p>
     <input type="hidden" name="action" value="save">
     <input type="hidden" name="short_code" value="{{ info.short_code }}">
     <input type="hidden" name="update_enabled" value="true">
