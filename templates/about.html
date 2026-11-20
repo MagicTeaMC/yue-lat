@@ -3,8 +3,16 @@
 {% block nav_about %}aria-current="page"{% endblock %}
 {% block content %}
 <h1>About</h1>
-<p>QuickGo makes fast, privacy-friendly short links without requiring an account.</p>
-<p>QuickGo uses no analytics or tracking scripts. It counts redirects only for links with a usage limit.</p>
+<p>A fast, lightweight URL shortener built with Rust.</p>
+
+<h2>Privacy Policy</h2>
+<p>QuickGo needs no account and uses no analytics or tracking scripts. A cookie protects web forms. Server logs include IP addresses and request details for operations and abuse prevention. The server rotates these logs daily and keeps up to 14 rotated copies.</p>
+<p>QuickGo stores short links, their destinations and settings, and counts redirects only for links with a usage limit. Visitor passwords, Edit Tokens and API keys are stored as hashes. Backups can contain link records. Pausing, expiry and revocation stop redirects without deleting records.</p>
+<p><a href="https://maoyue.tw/#contact" rel="noreferrer">Contact the operator</a> with privacy questions.</p>
+
+<h2>Terms of Service</h2>
+<p>Do not use QuickGo for phishing, malware or spam. QuickGo may rate-limit requests and permanently revoke abusive links. A visitor password protects the redirect only. The destination site controls its own access.</p>
+
 <h2>Report abuse</h2>
-<p><a href="https://maoyue.tw/#contact" rel="noreferrer">Contact me</a> and include the short link.</p>
+<p><a href="https://maoyue.tw/#contact" rel="noreferrer">Contact me</a> and include the short link and a brief description.</p>
 {% endblock %}
